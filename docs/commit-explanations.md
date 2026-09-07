@@ -169,3 +169,67 @@ Faker is great for generating realistic data at scale, but it's a heavy dependen
 **If an interviewer asks:** "What happens if the broker is down when you produce?" Answer: "The `confluent-kafka` producer has an internal buffer and retry mechanism. If the broker is temporarily unreachable, messages are buffered locally and retried automatically (configurable with `retries` and `retry.backoff.ms`). If the broker stays down beyond the retry window, the delivery callback fires with an error. In production, you'd log these failures and potentially write to a dead-letter queue or local file for replay."
 
 **If an interviewer asks:** "How would you scale the producer?" Answer: "The producer isn't the bottleneck — Kafka producers can easily push millions of messages per second. If you needed to simulate high volume, you'd remove the sleep and produce in batches. The consumer side is where scaling matters — adding more consumer instances in the same consumer group distributes partitions across them."
+
+### Commit: Consumer — triage events with Gemini and store results
+
+**What:** Built the three remaining modules that complete the pipeline: `llm.py` (Gemini client), `db.py` (Postgres writer), and `consumer.py` (Kafka consumer that ties everything together).
+
+**Key concepts:**
+- **Gemini structured output** — the `google-genai` SDK lets you pass a Pydantic model as `response_schema` in the request config. Gemini then constrains its output to match that schema exactly — every field present, every enum value valid. Combined with `response_mime_type="application/json"`, the response is guaranteed to be parseable JSON matching our `TriageResult` model.
+- **Manual offset commit** — `enable.auto.commit: False` means the consumer explicitly calls `consumer.commit(message=msg)` after successfully processing each event. This is the "at-least-once" delivery guarantee: if the consumer crashes before committing, Kafka redelivers the message. The alternative (`auto.commit: True`) commits offsets on a timer, which risks "at-most-once" — losing messages that were committed but not yet processed.
+- **Idempotent writes** — `ON CONFLICT (event_id) DO NOTHING` makes the database insert safe to repeat. Combined with manual offset commit, this gives us effective exactly-once processing: even if a message is delivered twice, the second insert is silently ignored.
+
+**How the consumer loop works:**
+```
+while True:
+    msg = consumer.poll(1.0)          # block up to 1 second for a message
+    if msg is None: continue          # no message available, poll again
+    if msg.error(): handle_error()    # broker-level errors (partition EOF, etc.)
+
+    event = deserialize(msg)          # JSON → SupportTicketEvent
+    result = triage_ticket(event)     # call Gemini API
+    save_triage_result(event, result) # write to Postgres
+    consumer.commit(message=msg)      # tell Kafka we're done with this offset
+```
+The order is critical: process → save → commit. If we committed before saving, a crash would mean the event is "consumed" but the result is lost.
+
+**The Gemini integration (`llm.py`):**
+```python
+response = client.models.generate_content(
+    model=settings.gemini_model,
+    contents=build_user_prompt(event),
+    config=types.GenerateContentConfig(
+        system_instruction=SYSTEM_PROMPT,
+        response_mime_type="application/json",
+        response_schema=TriageResult,        # ← constrains LLM output
+        temperature=0.1,                     # ← low temperature for consistent classification
+    ),
+)
+```
+Key design choices:
+- **`temperature=0.1`** — classification should be deterministic. A "payment charged twice" ticket should always be `critical`, not sometimes `medium`. Low temperature reduces randomness.
+- **`response_schema=TriageResult`** — this is not just a hint; Gemini uses it for constrained decoding. The LLM physically cannot output a category that isn't in our `TicketCategory` enum.
+- **`system_instruction`** with explicit guidelines — the prompt defines urgency levels and action mappings so the LLM's decisions are predictable and auditable.
+
+**The database layer (`db.py`):**
+```python
+def save_triage_result(event, result) -> bool:
+    cur.execute("""
+        INSERT INTO triage_results (...) VALUES (...)
+        ON CONFLICT (event_id) DO NOTHING
+    """, (...))
+    return cur.rowcount > 0  # True if inserted, False if duplicate
+```
+The function returns a boolean so the consumer can log whether this was a new event or a reprocessed duplicate. In production, you'd track this as a metric — a high duplicate rate might indicate consumer rebalancing issues.
+
+**Design decision: Why one connection per insert instead of a connection pool?**
+
+For V0, simplicity wins. The consumer processes one event every 2-6 seconds — opening and closing a connection each time is fine at this throughput. In V1/V2, when we add FastAPI and higher throughput, we'd switch to a connection pool (e.g., `psycopg2.pool.ThreadedConnectionPool` or `asyncpg` with a pool).
+
+**Design decision: Why `continue` on LLM errors instead of crashing?**
+
+If Gemini returns an error (rate limit, malformed response, network timeout), we log it and skip to the next message. The failed message's offset is NOT committed, so Kafka will redeliver it on the next poll. This gives us automatic retry without any retry logic — the consumer group protocol handles it. The downside is that a persistently failing message would block the partition. In V1, we'd add a dead-letter queue for messages that fail N times.
+
+**If an interviewer asks:** "What's the difference between at-most-once, at-least-once, and exactly-once delivery?" Answer: "At-most-once: commit the offset before processing — fast but you might lose messages. At-least-once: commit after processing — no data loss but you might process duplicates. Exactly-once: use Kafka transactions (idempotent producer + transactional consumer) — guaranteed but complex and slower. We use at-least-once with idempotent database writes (`ON CONFLICT DO NOTHING`), which gives us effective exactly-once semantics without the complexity of Kafka transactions."
+
+**If an interviewer asks:** "How would you handle the Gemini rate limit in production?" Answer: "Three layers: (1) Rate-aware consumption — track requests per minute and pause polling when approaching the limit. (2) Exponential backoff on 429 responses — the `tenacity` library (already a dependency via google-genai) handles this. (3) Multiple API keys or a higher-tier plan for production volume. The current 2-6 second random delay in the producer naturally keeps us under 15 RPM, but that's a development convenience, not a production strategy."
