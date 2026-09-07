@@ -16,6 +16,28 @@ A developer's walkthrough of every commit, explaining what was built, why, and h
 - **`[project.scripts]`** registers CLI entry points: `produce = "triage_pipeline.producer:main"` means running `uv run produce` calls the `main()` function in `producer.py`.
 - **pydantic-settings** reads config from environment variables and `.env` files with type validation. If a required config value is missing or wrong-typed, it fails at startup — not 3 hours later in production.
 
+**`.gitignore` — what gets excluded and why:**
+```
+__pycache__/          # Python bytecode cache — regenerated on every run
+*.py[cod]             # compiled Python files (.pyc, .pyo, .pyd)
+*.egg-info/, dist/    # build artifacts from packaging — never commit these
+.venv/                # virtual environment — each dev recreates with `uv sync`
+.env                  # SECRETS live here (API keys, passwords) — .env.example is the template
+.idea/, .vscode/      # IDE settings are personal preference, not project config
+.pytest_cache/        # test runner cache
+uv.lock               # lockfile — see note below
+```
+
+**Why `.env` is gitignored but `.env.example` is committed:**
+
+`.env` contains real secrets (your `GEMINI_API_KEY`, database passwords). If you commit it, those secrets are in git history forever — even if you delete the file later, `git log` still has it. `.env.example` is the template with placeholder values (`your-api-key-here`) so new developers know which variables to set.
+
+**Why `uv.lock` is gitignored here:**
+
+In application projects (deployed services), you typically **do** commit the lockfile so every environment runs the exact same versions. In library projects, you don't. For this portfolio project, we gitignore it to keep the diff clean — anyone cloning runs `uv sync` which generates their own lockfile. In a production codebase, you'd commit it.
+
+**If an interviewer asks:** "Why not commit the lockfile?" Answer: "It depends on whether you're building an application or a library. For a deployed service where reproducible builds matter, you commit it. For a library that others install as a dependency, you don't — you let their resolver pick compatible versions. This project is a portfolio demo, so I optimized for clone-and-run simplicity, but in production I'd commit it."
+
 **How pydantic-settings works here:**
 ```python
 class Settings(BaseSettings):
@@ -82,3 +104,36 @@ Redpanda Console is a web UI (at `localhost:8090`) that lets you browse topics, 
 **If an interviewer asks:** "What's the difference between Kafka and Redpanda?" Answer: "At the protocol level, nothing — Redpanda implements the Kafka API, so any Kafka client library works unchanged. The differences are operational: Redpanda is a single binary (no JVM, no ZooKeeper, no KRaft controller), it's written in C++ with thread-per-core architecture, and it typically has lower tail latencies. For this project, I chose it because it simplifies local development — one container instead of three — while keeping the code production-portable to real Kafka."
 
 **If an interviewer asks:** "How do you handle duplicate message processing?" Answer: "Two mechanisms. First, Kafka consumer groups track offsets — after a message is processed and committed, it won't be delivered again under normal operation. But if the consumer crashes between processing and committing, the message will be redelivered. That's where the second mechanism comes in: the `event_id UNIQUE` constraint in Postgres. An idempotent `INSERT` (or `ON CONFLICT DO NOTHING`) means reprocessing the same event is a no-op at the database level."
+
+### Commit: Domain models for support ticket events and triage results
+
+**What:** Created Pydantic models for the two core data shapes — `SupportTicketEvent` (what goes into the pipeline) and `TriageResult` (what comes out after LLM processing) — plus `StrEnum` types for constrained fields.
+
+**Key concepts:**
+- **Pydantic models** (`BaseModel`) define the shape of data with automatic type validation. If you pass wrong types, Pydantic raises an error immediately — no silent failures downstream.
+- **StrEnum** (Python 3.11+) combines `str` and `Enum` — the values serialize as plain strings in JSON (`"order_issue"`) but are type-safe in Python code. This matters because both the Kafka messages and the Gemini response schema need plain string values, not `TicketCategory.ORDER_ISSUE`.
+- **`Field(default_factory=...)`** generates a value at instance creation time. `event_id` gets a unique UUID, `timestamp` gets the current UTC time. Using a factory instead of a default value avoids the classic mutable-default-argument bug.
+
+**The two models and how they flow through the system:**
+```
+SupportTicketEvent                    TriageResult
+├── event_id (auto UUID)              ├── event_id (copied from event)
+├── customer_name         ──LLM──►    ├── category (StrEnum)
+├── customer_email                    ├── urgency (StrEnum)
+├── subject                           ├── suggested_action (StrEnum)
+├── message                           ├── draft_response (optional)
+└── timestamp (auto UTC)              └── reasoning
+```
+The `event_id` is the thread that connects an event through the entire pipeline — from the producer, through Kafka, into the LLM call, and finally into the database. It's the deduplication key.
+
+**Design decision: Why StrEnum instead of plain strings?**
+
+Plain strings are flexible but error-prone — a typo like `"ordr_issue"` would silently pass through the system. StrEnum constrains the values at the Python level. When used as a Gemini `response_schema`, it also constrains the LLM output — Gemini will only return values from the enum, not invent new categories.
+
+**Design decision: Why is `draft_response` optional?**
+
+Not every action needs a drafted response. If the agent decides to `escalate` or `request_info`, a canned draft might not make sense. Making it `str | None` lets the LLM decide whether a response draft is appropriate for the situation.
+
+**If an interviewer asks:** "Why Pydantic instead of dataclasses?" Answer: "Pydantic gives us three things dataclasses don't: (1) automatic JSON serialization/deserialization with `model_dump()` and `model_validate()`, which we need for Kafka messages. (2) Type coercion and validation — if the LLM returns `urgency: 'HIGH'` instead of `'high'`, Pydantic handles the case mismatch. (3) Schema generation — `TriageResult` becomes the `response_schema` for Gemini's structured output, so the LLM is constrained to return exactly these fields."
+
+**If an interviewer asks:** "What's the difference between `str | None` and `Optional[str]`?" Answer: "They're identical at runtime — `Optional[str]` is just `Union[str, None]`. The `str | None` syntax (PEP 604, Python 3.10+) is the modern convention. We use it because it's cleaner and the project targets Python 3.12+."
