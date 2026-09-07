@@ -233,3 +233,48 @@ If Gemini returns an error (rate limit, malformed response, network timeout), we
 **If an interviewer asks:** "What's the difference between at-most-once, at-least-once, and exactly-once delivery?" Answer: "At-most-once: commit the offset before processing — fast but you might lose messages. At-least-once: commit after processing — no data loss but you might process duplicates. Exactly-once: use Kafka transactions (idempotent producer + transactional consumer) — guaranteed but complex and slower. We use at-least-once with idempotent database writes (`ON CONFLICT DO NOTHING`), which gives us effective exactly-once semantics without the complexity of Kafka transactions."
 
 **If an interviewer asks:** "How would you handle the Gemini rate limit in production?" Answer: "Three layers: (1) Rate-aware consumption — track requests per minute and pause polling when approaching the limit. (2) Exponential backoff on 429 responses — the `tenacity` library (already a dependency via google-genai) handles this. (3) Multiple API keys or a higher-tier plan for production volume. The current 2-6 second random delay in the producer naturally keeps us under 15 RPM, but that's a development convenience, not a production strategy."
+
+### Commit: Unit tests, pre-push hook, and GitHub Actions CI
+
+**What:** Added 19 unit tests covering models, producer, and prompt building. Set up a `pre-push` git hook that runs lint + tests locally before every push, and a GitHub Actions workflow that runs the same checks in CI.
+
+**Key concepts:**
+- **Unit vs integration tests** — the tests in this commit need zero infrastructure (no Docker, no Gemini API key, no Postgres). They test pure Python logic: model validation, JSON serialization roundtrips, template population, prompt format. Integration tests (against the live stack) belong in CI only — they're slower, flakier, and require credentials.
+- **Pre-push hook** — a script in `.git/hooks/pre-push` that Git runs before every `git push`. If it exits non-zero, the push is aborted. We run `ruff check` and `pytest` here so broken code never reaches GitHub. We use pre-push (not pre-commit) because running tests on every commit would slow down the feedback loop during development.
+- **GitHub Actions** — the CI workflow triggers on pushes to `main` and on pull requests. It installs `uv`, sets up Python 3.13, and runs the same lint + test commands. This catches issues from contributors who didn't set up the hook.
+
+**What the tests actually verify:**
+```
+test_models.py (9 tests):
+├── Auto-generated fields (event_id, timestamp)
+├── UUID uniqueness across 100 instances
+├── JSON serialization roundtrip (model → JSON → model)
+├── Rejection of missing required fields
+├── StrEnum values serialize as plain strings
+└── TriageResult validation (valid, with draft, invalid category)
+
+test_producer.py (5 tests):
+├── generate_ticket() returns valid SupportTicketEvent
+├── Uses only known customer names/subjects
+├── Templates are fully populated (no {order_id} leftovers)
+└── Unique event IDs across batch
+
+test_llm.py (5 tests):
+├── User prompt includes all event fields
+├── Prompt has structured format (Customer/Subject/Message)
+└── System prompt contains all valid enum values
+```
+
+The system prompt tests (`test_contains_all_categories`, etc.) are particularly useful — if someone adds a new `TicketCategory` enum value but forgets to mention it in the system prompt, the test catches the mismatch.
+
+**Design decision: Why not mock the Gemini API and test `triage_ticket()`?**
+
+Mocking an LLM response tests that your parsing code works against a fake response you wrote yourself — it doesn't test that the real API returns what you expect. The actual value of testing the LLM call is verifying that the prompt + schema produce correct classifications, which requires the real API. We'll do that in integration tests. Mocking here would give false confidence.
+
+**Design decision: Why keep the hook script in `scripts/` instead of `.git/hooks/`?**
+
+The `.git/` directory is never committed — it's local to each clone. By keeping the script in `scripts/pre-push`, it's version-controlled and visible in the repo. New contributors copy it with `cp scripts/pre-push .git/hooks/pre-push`. Some projects automate this with a `make setup` or `post-checkout` hook, but for a portfolio project the manual step is fine.
+
+**If an interviewer asks:** "Why pre-push instead of pre-commit?" Answer: "Pre-commit runs on every commit, which is great for instant feedback but slows down rapid iteration — especially when tests take more than a few seconds. Pre-push is the last checkpoint before code leaves your machine, so it catches issues without interrupting your commit flow. For a project with ~1 second test runtime either works, but the pattern scales better — in a larger project with a 30-second test suite, pre-commit would be painful."
+
+**If an interviewer asks:** "How would you add integration tests?" Answer: "I'd add a `tests/integration/` directory with a `conftest.py` that checks for running Docker services and skips if unavailable. Tests would use the real Redpanda and Postgres from Docker Compose, and a real Gemini API key from the environment. In CI, the workflow would `docker compose up -d`, wait for health checks, run the integration tests, then `docker compose down`. Locally, developers run them optionally with `pytest tests/integration/`."
