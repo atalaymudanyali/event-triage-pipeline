@@ -137,3 +137,35 @@ Not every action needs a drafted response. If the agent decides to `escalate` or
 **If an interviewer asks:** "Why Pydantic instead of dataclasses?" Answer: "Pydantic gives us three things dataclasses don't: (1) automatic JSON serialization/deserialization with `model_dump()` and `model_validate()`, which we need for Kafka messages. (2) Type coercion and validation — if the LLM returns `urgency: 'HIGH'` instead of `'high'`, Pydantic handles the case mismatch. (3) Schema generation — `TriageResult` becomes the `response_schema` for Gemini's structured output, so the LLM is constrained to return exactly these fields."
 
 **If an interviewer asks:** "What's the difference between `str | None` and `Optional[str]`?" Answer: "They're identical at runtime — `Optional[str]` is just `Union[str, None]`. The `str | None` syntax (PEP 604, Python 3.10+) is the modern convention. We use it because it's cleaner and the project targets Python 3.12+."
+
+### Commit: Producer — publish synthetic support tickets to Redpanda
+
+**What:** Built the event producer — generates realistic-looking support ticket events from predefined customer/ticket templates and publishes them to a Redpanda topic as JSON.
+
+**Key concepts:**
+- **confluent-kafka Producer** is the Python client for Kafka-protocol brokers. `Producer({"bootstrap.servers": "..."})` connects to the broker. `.produce(topic, key, value, callback)` enqueues a message, and `.poll(0)` triggers delivery callbacks without blocking.
+- **Message key** — we use `event_id` as the Kafka message key. In Kafka, messages with the same key always go to the same partition, which guarantees ordering per key. For support tickets, this means all events related to one ticket (if we later add follow-ups) would be processed in order.
+- **Delivery callback** — `producer.produce()` is asynchronous; the message is buffered locally and sent in batches. The `callback` parameter receives a confirmation (or error) when the broker actually acknowledges the message. This is how you know a message was durably written vs silently dropped.
+
+**The synthetic data approach:**
+```python
+CUSTOMERS = [("Ayşe Yılmaz", "ayse.yilmaz@email.com"), ...]
+TICKETS = [("Order not delivered", "I placed an order...{order_id}..."), ...]
+```
+Templates use Python string formatting (`{order_id}`, `{amount}`) to inject random values, so each generated ticket is unique but realistic. The customer names are Turkish — intentional, since this demo targets Turkish e-commerce companies.
+
+**Why `random.uniform(2, 6)` between events?**
+
+A real support system receives tickets at irregular intervals, not at a fixed rate. The random delay simulates this and also prevents overwhelming the Gemini free tier (15 requests per minute). At 2-6 second intervals, we produce ~10-30 events per minute — comfortably under the rate limit.
+
+**Design decision: Why `confluent-kafka` instead of `kafka-python`?**
+
+`confluent-kafka` is the official Confluent client, built on top of `librdkafka` (a battle-tested C library). It's what companies actually use in production. `kafka-python` is pure Python — easier to install but slower, less reliable under load, and the original project is no longer maintained (there's a fork called `kafka-python-ng`). For a portfolio project that claims to demonstrate production patterns, the client library choice matters.
+
+**Design decision: Why not use a data generation library like Faker?**
+
+Faker is great for generating realistic data at scale, but it's a heavy dependency for what we need — 8 customers and 10 ticket templates. Handcrafted templates give us control over the exact scenarios the LLM will classify (we want coverage across all categories, not random noise). And each template is written to test a specific triage path — "payment charged twice" should trigger `critical` urgency, "how do I track my order" should trigger `low`.
+
+**If an interviewer asks:** "What happens if the broker is down when you produce?" Answer: "The `confluent-kafka` producer has an internal buffer and retry mechanism. If the broker is temporarily unreachable, messages are buffered locally and retried automatically (configurable with `retries` and `retry.backoff.ms`). If the broker stays down beyond the retry window, the delivery callback fires with an error. In production, you'd log these failures and potentially write to a dead-letter queue or local file for replay."
+
+**If an interviewer asks:** "How would you scale the producer?" Answer: "The producer isn't the bottleneck — Kafka producers can easily push millions of messages per second. If you needed to simulate high volume, you'd remove the sleep and produce in batches. The consumer side is where scaling matters — adding more consumer instances in the same consumer group distributes partitions across them."
