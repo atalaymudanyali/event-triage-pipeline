@@ -40,6 +40,23 @@ class SupportTicketEvent(BaseModel):
     )
 
 
+class ClassificationResult(BaseModel):
+    category: TicketCategory
+    language: str
+    reasoning: str
+
+
+class UrgencyAssessment(BaseModel):
+    urgency: Urgency
+    suggested_action: SuggestedAction
+    reasoning: str
+
+
+class DraftResponse(BaseModel):
+    response_text: str
+    tone: str
+
+
 class TriageResult(BaseModel):
     event_id: str
     category: TicketCategory
@@ -47,3 +64,4 @@ class TriageResult(BaseModel):
     suggested_action: SuggestedAction
     draft_response: str | None = None
     reasoning: str
+    language: str = "en"
