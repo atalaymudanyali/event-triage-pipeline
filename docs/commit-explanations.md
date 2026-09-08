@@ -405,3 +405,32 @@ If we didn't commit, Kafka would redeliver the same failing event on every poll,
 **If an interviewer asks:** "What happens to events in the dead-letter topic?" Answer: "In production, you'd have a monitoring alert on DLT message count. An engineer inspects the failed events, fixes the root cause (bad prompt, schema change, API outage), and replays them — either manually or with a replay tool that reads from the DLT and publishes back to the main topic. The DLT is a holding area, not a graveyard."
 
 **If an interviewer asks:** "What if the DLT publish itself fails?" Answer: "The `producer.flush(timeout=5)` ensures the DLT publish is synchronous — we wait for broker acknowledgment. If it fails (broker down), the flush times out and the offset isn't committed (because we haven't reached that line yet). On the next poll, Kafka redelivers the original event, and we retry the whole flow including the DLT publish. The only way to lose data is if both the main topic consumer and the DLT producer fail simultaneously, which is a cluster-level outage."
+
+### Commit: FastAPI app — events, stats, and manual submission
+
+**What:** Added a FastAPI application with three endpoint groups: `GET /events` (recent triage results), `GET /stats` (classification distribution), and `POST /events` (submit a test event to Redpanda). Added query functions to `db.py`.
+
+**Key concepts:**
+- **FastAPI** is a modern Python web framework that auto-generates OpenAPI docs from type annotations. Pydantic models used as request/response types become the API schema — the same `SupportTicketEvent` model validates both Kafka messages and HTTP requests.
+- **`RealDictCursor`** (psycopg2) returns query results as dictionaries instead of tuples. This makes the results directly JSON-serializable without manual column mapping.
+- **Separation of concerns** — the API doesn't call the LLM directly. It either reads from the database (past results) or publishes to Redpanda (new events for the consumer to process). The consumer is the only component that calls Gemini. This keeps the architecture clean: API = read state + submit events, Consumer = process events.
+
+**The three endpoints:**
+```
+GET  /health          → {"status": "ok"}
+GET  /events?limit=20 → recent triage results from Postgres
+GET  /stats           → {total_processed, by_category, by_urgency, by_action}
+POST /events          → publish a SupportTicketEvent to Redpanda
+```
+
+**Design decision: Why does POST /events publish to Kafka instead of calling the agent directly?**
+
+If the API called the agent directly, you'd have two code paths: one for Kafka events and one for HTTP events. Bugs could exist in one path but not the other. By publishing to Redpanda, every event goes through the same pipeline — the consumer processes it identically regardless of whether it came from the producer script or the API. This is the "single writer" pattern.
+
+**Design decision: Why `uvicorn.run()` with `reload=True`?**
+
+`reload=True` watches for file changes and restarts the server automatically during development. In production, you'd run uvicorn without reload and behind a reverse proxy (nginx, Traefik). The `start()` function wraps this so `uv run api` launches the server.
+
+**If an interviewer asks:** "How would you secure this API in production?" Answer: "Multiple layers: (1) API key or JWT authentication middleware. (2) Rate limiting on the POST endpoint to prevent abuse. (3) Input validation — FastAPI + Pydantic already handle this, but you'd add size limits on the message field. (4) CORS configuration to restrict which frontends can call it. (5) Run behind a reverse proxy that handles TLS termination."
+
+**If an interviewer asks:** "Why not use async/await with FastAPI?" Answer: "FastAPI supports both sync and async handlers. Our database calls use psycopg2, which is synchronous. Making the handlers async while using sync DB calls would actually be worse — FastAPI would run them in a thread pool anyway, adding overhead without benefit. If we switched to asyncpg (async Postgres client), then async handlers would make sense. For the current throughput, sync is simpler and correct."
