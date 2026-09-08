@@ -434,3 +434,33 @@ If the API called the agent directly, you'd have two code paths: one for Kafka e
 **If an interviewer asks:** "How would you secure this API in production?" Answer: "Multiple layers: (1) API key or JWT authentication middleware. (2) Rate limiting on the POST endpoint to prevent abuse. (3) Input validation — FastAPI + Pydantic already handle this, but you'd add size limits on the message field. (4) CORS configuration to restrict which frontends can call it. (5) Run behind a reverse proxy that handles TLS termination."
 
 **If an interviewer asks:** "Why not use async/await with FastAPI?" Answer: "FastAPI supports both sync and async handlers. Our database calls use psycopg2, which is synchronous. Making the handlers async while using sync DB calls would actually be worse — FastAPI would run them in a thread pool anyway, adding overhead without benefit. If we switched to asyncpg (async Postgres client), then async handlers would make sense. For the current throughput, sync is simpler and correct."
+
+---
+
+### Commit: V1 tests — agent, intermediate models, and FastAPI endpoints
+
+**What:** Added three test files covering all new V1 code: `test_agent.py` (multi-step agent prompts, `_format_ticket` helper, `LLMRetryableError`), `test_models_v1.py` (intermediate models: `ClassificationResult`, `UrgencyAssessment`, `DraftResponse`, plus `TriageResult.language` field), and `test_api.py` (FastAPI health endpoint and OpenAPI schema verification).
+
+**Key concepts:**
+- **Testing prompts, not LLM calls** — calling Gemini in CI would be slow, flaky, and cost money. Instead, we verify that every prompt contains the right enum values and keywords. If someone adds a new `TicketCategory` but forgets to update the classify prompt, these tests catch it.
+- **FastAPI `TestClient`** — built on Starlette's test client, it lets you call endpoints without starting a real server. Requests run in-process against the ASGI app, so tests are fast and deterministic. No port binding, no HTTP overhead.
+- **OpenAPI schema assertions** — checking that `/openapi.json` lists `/events` and `/stats` paths ensures the endpoints are actually registered. If someone accidentally removes a route decorator, the test catches it immediately.
+
+**Test coverage strategy:**
+```
+test_agent.py     → prompt completeness, _format_ticket, LLMRetryableError
+test_models_v1.py → intermediate model validation, enum enforcement, defaults
+test_api.py       → health check, OpenAPI schema structure
+```
+
+**Design decision: Why test `_format_ticket` separately?**
+
+`_format_ticket` is a pure function — given a `SupportTicketEvent`, it returns a formatted string. No LLM, no network, no side effects. These are the functions most worth testing because they're fast, deterministic, and compose into the rest of the pipeline. If the format changes and breaks the LLM's ability to parse tickets, the tests show exactly where the formatting expectation diverged.
+
+**Design decision: Why not mock Gemini and test the full agent flow?**
+
+Mocking `_call_gemini` and asserting the pipeline wires steps together would test *our mocking setup*, not our code. The interesting behavior — does each step feed the right context to the next — is already visible from reading the code and is validated by the prompt tests. Integration tests with a real LLM belong in a separate, optional test suite that runs manually, not in CI.
+
+**If an interviewer asks:** "How would you test the retry/backoff logic without hitting rate limits?" Answer: "You'd inject the LLM client as a dependency and use a fake that raises `LLMRetryableError` N times before succeeding. Then assert that the function retried the expected number of times using tenacity's statistics — `_call_gemini.retry.statistics['attempt_number']`. This tests the retry configuration without needing any external service."
+
+**If an interviewer asks:** "Your API tests don't test the database endpoints — why?" Answer: "The `/events` and `/stats` endpoints require a running Postgres with the schema applied. That's an integration test, not a unit test. We test the health endpoint and OpenAPI schema (pure application logic) here, and test database queries separately during live pipeline testing. In V2, a Docker-based test fixture could spin up Postgres for CI."
