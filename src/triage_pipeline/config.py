@@ -9,6 +9,8 @@ class Settings(BaseSettings):
 
     kafka_bootstrap_servers: str = "localhost:19092"
     kafka_topic: str = "support-tickets"
+    kafka_dlt_topic: str = "support-tickets-dlt"
+    max_retries: int = 3
 
     postgres_host: str = "localhost"
     postgres_port: int = 5433

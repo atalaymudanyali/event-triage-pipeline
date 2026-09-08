@@ -364,3 +364,44 @@ The `google-genai` SDK wraps API errors in generic exception types. A 429 and a 
 **If an interviewer asks:** "What's the difference between retry at the HTTP level vs the application level?" Answer: "HTTP-level retry (e.g., `httpx` transport retry) retries the raw request. Application-level retry (tenacity) retries the whole operation, which might include JSON parsing, validation, and context assembly. We retry at the application level because we want to re-execute the full function — if the response was partial or malformed, we want a fresh attempt, not just a re-send of the same bytes."
 
 **If an interviewer asks:** "How does this interact with the consumer's own retry via Kafka redelivery?" Answer: "Two different layers. Tenacity retries transient LLM errors within a single event processing attempt — the consumer stays on the same message. Kafka redelivery happens when the consumer crashes or restarts without committing — it's a coarser retry for infrastructure failures. They complement each other: tenacity handles API flakiness, Kafka handles process failures."
+
+### Commit: Dead-letter topic for failed events
+
+**What:** Events that fail all retries are published to a dead-letter topic (`support-tickets-dlt`) instead of being silently skipped. The consumer now tracks per-event retry counts and uses structured logging.
+
+**Key concepts:**
+- **Dead-letter topic (DLT)** — a Kafka topic where messages that can't be processed are sent. Instead of losing the message or blocking the partition forever, the consumer publishes the failed event (with the error message) to a separate topic. A human or automated system can later inspect, fix, and replay these events.
+- **Retry counting** — the consumer tracks `retry_counts[event_id]` in memory. Each time an event fails, the count increments. After `max_retries` (default 3) failures, the event goes to the DLT and the offset is committed (so Kafka doesn't redeliver it). If the event succeeds, the count is cleared.
+- **Structured logging** — replaced `print()` with Python's `logging` module. Log levels (`INFO`, `WARNING`, `ERROR`) let you filter output. Timestamps make it possible to correlate events across the producer and consumer. In V2, these log lines become the basis for Prometheus metrics.
+
+**The DLT flow:**
+```
+Event arrives → triage_ticket() fails
+  ↓
+retry_counts[event_id] += 1
+  ↓
+retries < max_retries?
+  YES → don't commit, Kafka redelivers on next poll
+  NO  → publish to DLT, commit offset, clear retry count
+```
+
+**What gets written to the DLT:**
+```json
+{
+  "event": { "event_id": "...", "customer_name": "...", ... },
+  "error": "429 RESOURCE_EXHAUSTED: rate limit exceeded"
+}
+```
+The original event is preserved in full, so it can be replayed without data loss.
+
+**Design decision: Why in-memory retry counts instead of persistent state?**
+
+Simplicity. If the consumer restarts, retry counts reset to zero — the event gets fresh retries. This is fine because restarts are rare and the tenacity retry (within each attempt) handles most transient errors. Persistent retry counts (in Redis or Postgres) add complexity that's only justified at scale.
+
+**Design decision: Why commit the offset after sending to DLT?**
+
+If we didn't commit, Kafka would redeliver the same failing event on every poll, creating an infinite loop. By committing after the DLT publish, we acknowledge "we've handled this event (by routing it to DLT)" and move on. The DLT is the safety net — the event isn't lost, it's just in a different topic.
+
+**If an interviewer asks:** "What happens to events in the dead-letter topic?" Answer: "In production, you'd have a monitoring alert on DLT message count. An engineer inspects the failed events, fixes the root cause (bad prompt, schema change, API outage), and replays them — either manually or with a replay tool that reads from the DLT and publishes back to the main topic. The DLT is a holding area, not a graveyard."
+
+**If an interviewer asks:** "What if the DLT publish itself fails?" Answer: "The `producer.flush(timeout=5)` ensures the DLT publish is synchronous — we wait for broker acknowledgment. If it fails (broker down), the flush times out and the offset isn't committed (because we haven't reached that line yet). On the next poll, Kafka redelivers the original event, and we retry the whole flow including the DLT publish. The only way to lose data is if both the main topic consumer and the DLT producer fail simultaneously, which is a cluster-level outage."
