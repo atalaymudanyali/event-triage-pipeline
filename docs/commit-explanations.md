@@ -278,3 +278,89 @@ The `.git/` directory is never committed — it's local to each clone. By keepin
 **If an interviewer asks:** "Why pre-push instead of pre-commit?" Answer: "Pre-commit runs on every commit, which is great for instant feedback but slows down rapid iteration — especially when tests take more than a few seconds. Pre-push is the last checkpoint before code leaves your machine, so it catches issues without interrupting your commit flow. For a project with ~1 second test runtime either works, but the pattern scales better — in a larger project with a 30-second test suite, pre-commit would be painful."
 
 **If an interviewer asks:** "How would you add integration tests?" Answer: "I'd add a `tests/integration/` directory with a `conftest.py` that checks for running Docker services and skips if unavailable. Tests would use the real Redpanda and Postgres from Docker Compose, and a real Gemini API key from the environment. In CI, the workflow would `docker compose up -d`, wait for health checks, run the integration tests, then `docker compose down`. Locally, developers run them optionally with `pytest tests/integration/`."
+
+---
+
+## V1 Commits
+
+### Commit: Add intermediate models for multi-step agent pipeline
+
+**What:** Added three new Pydantic models — `ClassificationResult`, `UrgencyAssessment`, `DraftResponse` — that represent the output of each agent step. Added a `language` field to `TriageResult`.
+
+**Key concepts:**
+- **Intermediate models** break a complex LLM task into smaller, verifiable steps. Instead of asking the LLM to do everything at once (classify, assess urgency, decide action, draft a response), each step has its own model with its own constrained output. This is the "chain of thought via code" pattern — the code controls the reasoning flow, not the LLM.
+- **Each model is a contract.** `ClassificationResult` guarantees the LLM returns a valid `TicketCategory` and a language code. `UrgencyAssessment` guarantees a valid `Urgency` and `SuggestedAction`. If any step returns garbage, Pydantic catches it at that step — not at the end when it's harder to debug.
+
+**Why split into steps?**
+
+A single prompt doing everything has three problems: (1) It's hard to debug — if the urgency is wrong, was it because the classification was wrong, or the urgency logic was wrong? With separate steps, you can inspect each intermediate result. (2) Each step gets a focused prompt — a shorter, more specific prompt produces better results than a long one with many instructions. (3) Each step can be tested, retried, and monitored independently.
+
+**Design decision: Why detect language as a step output?**
+
+In V0, the LLM sometimes responded in Turkish and sometimes in English with no predictability. By making language detection explicit in step 1, step 3 (draft response) can be instructed to match the customer's language. This makes the agent's behavior deterministic and auditable.
+
+**If an interviewer asks:** "Isn't 3 LLM calls per event expensive and slow?" Answer: "It's a tradeoff. A single call is faster and cheaper, but harder to debug and less reliable. With 3 calls, each step is simpler and more constrained, which means higher accuracy and better observability. In production, you'd measure whether the accuracy improvement justifies the cost. For many companies, a misclassified critical ticket costs far more than two extra API calls."
+
+### Commit: Multi-step agent replacing single LLM call
+
+**What:** Created `agent.py` with the 3-step pipeline: `step_classify` → `step_assess_urgency` → `step_draft_response`. Each step builds context from the previous step's output. Updated the consumer to import from `agent` instead of `llm`. Updated DB schema and insert to include `language`.
+
+**Key concepts:**
+- **Context chaining** — each step receives the original ticket plus the output of all previous steps. Step 2 (urgency) sees the classification result, so it can make urgency decisions based on the category. Step 3 (draft response) sees both classification and urgency, so it can match the tone to the situation.
+- **Shared `_call_gemini` helper** — all three steps use the same function to call Gemini with structured output. This centralizes error handling, model configuration, and JSON parsing in one place.
+
+**How context flows through the pipeline:**
+```
+Step 1: classify
+  Input:  ticket (customer, subject, message)
+  Output: ClassificationResult (category, language, reasoning)
+
+Step 2: assess urgency
+  Input:  ticket + classification result
+  Output: UrgencyAssessment (urgency, suggested_action, reasoning)
+
+Step 3: draft response
+  Input:  ticket + classification + urgency assessment
+  Output: DraftResponse (response_text, tone)
+
+Final:   TriageResult assembled from all three outputs
+```
+
+**Design decision: Why a new `agent.py` instead of modifying `llm.py`?**
+
+`llm.py` represents the V0 approach (single call). Keeping it around makes the evolution visible in the codebase — anyone reading the repo can see the before and after. The consumer's import change from `llm` to `agent` is a one-line diff that tells the whole story.
+
+**If an interviewer asks:** "How would you add a new step to the agent?" Answer: "Define a new Pydantic model for the step's output, write a prompt, create a `step_*` function that calls `_call_gemini` with the appropriate context, and wire it into `triage_ticket()`. The pattern is designed to be additive — new steps don't modify existing ones."
+
+### Commit: Retry with exponential backoff on rate limit errors
+
+**What:** Wrapped `_call_gemini` with `tenacity` retry logic. Rate limit (429) and service unavailable (503) errors trigger exponential backoff (4s → 8s → 16s → 32s → 60s, up to 5 attempts). Other errors propagate immediately.
+
+**Key concepts:**
+- **tenacity** is a Python retry library (already a transitive dependency via `google-genai`). The `@retry` decorator wraps a function with configurable retry behavior — no retry loops or sleep calls in your code.
+- **Exponential backoff** — each retry waits twice as long as the previous one. This is critical for rate limits: if 10 consumers all hit a 429 at the same time and retry after a fixed 1 second, they'll all hit the limit again simultaneously. Exponential backoff with jitter (which tenacity adds by default) spreads them out.
+- **Retryable vs non-retryable errors** — a 429 (rate limit) is transient: wait and try again. A 401 (bad API key) is permanent: retrying won't fix it. The `LLMRetryableError` class separates these so only transient errors trigger retry.
+
+**How the retry decorator works:**
+```python
+@retry(
+    retry=retry_if_exception_type(LLMRetryableError),  # only retry these
+    wait=wait_exponential(multiplier=2, min=4, max=60), # 4s, 8s, 16s, 32s, 60s
+    stop=stop_after_attempt(5),                         # give up after 5 tries
+    before_sleep=before_sleep_log(logger, logging.WARNING),  # log each retry
+    reraise=True,                                       # raise the real error if exhausted
+)
+def _call_gemini(...):
+```
+
+**Design decision: Why 5 attempts with max 60s wait?**
+
+The Gemini free tier allows 5 requests per minute. If we hit the limit, the first retry at 4 seconds might still fail, but by the third retry (~28s total elapsed) we're likely in a new rate limit window. 5 attempts with a 60s max gives us about 2 minutes of total retry time — enough to ride out a brief rate limit burst without blocking the consumer indefinitely.
+
+**Design decision: Why classify errors by string matching instead of exception types?**
+
+The `google-genai` SDK wraps API errors in generic exception types. A 429 and a 400 might both be a `google.genai.errors.ClientError`. Since we can't reliably distinguish by exception class, we check the error message for "429", "503", and "UNAVAILABLE". This is pragmatic — the alternative is catching every possible exception subclass, which is fragile against SDK version changes.
+
+**If an interviewer asks:** "What's the difference between retry at the HTTP level vs the application level?" Answer: "HTTP-level retry (e.g., `httpx` transport retry) retries the raw request. Application-level retry (tenacity) retries the whole operation, which might include JSON parsing, validation, and context assembly. We retry at the application level because we want to re-execute the full function — if the response was partial or malformed, we want a fresh attempt, not just a re-send of the same bytes."
+
+**If an interviewer asks:** "How does this interact with the consumer's own retry via Kafka redelivery?" Answer: "Two different layers. Tenacity retries transient LLM errors within a single event processing attempt — the consumer stays on the same message. Kafka redelivery happens when the consumer crashes or restarts without committing — it's a coarser retry for infrastructure failures. They complement each other: tenacity handles API flakiness, Kafka handles process failures."

@@ -1,7 +1,15 @@
 import json
+import logging
 
 from google import genai
 from google.genai import types
+from tenacity import (
+    before_sleep_log,
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from triage_pipeline.config import settings
 from triage_pipeline.models import (
@@ -11,6 +19,8 @@ from triage_pipeline.models import (
     TriageResult,
     UrgencyAssessment,
 )
+
+logger = logging.getLogger(__name__)
 
 CLASSIFY_PROMPT = """\
 You are a ticket classifier for a Turkish e-commerce company.
@@ -57,19 +67,36 @@ Also indicate the **tone** you used: "empathetic", "informational", or "urgent".
 """
 
 
+class LLMRetryableError(Exception):
+    pass
+
+
+@retry(
+    retry=retry_if_exception_type(LLMRetryableError),
+    wait=wait_exponential(multiplier=2, min=4, max=60),
+    stop=stop_after_attempt(5),
+    before_sleep=before_sleep_log(logger, logging.WARNING),
+    reraise=True,
+)
 def _call_gemini(system_prompt: str, user_content: str, schema: type):
     client = genai.Client(api_key=settings.gemini_api_key)
-    response = client.models.generate_content(
-        model=settings.gemini_model,
-        contents=user_content,
-        config=types.GenerateContentConfig(
-            system_instruction=system_prompt,
-            response_mime_type="application/json",
-            response_schema=schema,
-            temperature=0.1,
-        ),
-    )
-    return json.loads(response.text)
+    try:
+        response = client.models.generate_content(
+            model=settings.gemini_model,
+            contents=user_content,
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                response_mime_type="application/json",
+                response_schema=schema,
+                temperature=0.1,
+            ),
+        )
+        return json.loads(response.text)
+    except Exception as e:
+        error_str = str(e)
+        if "429" in error_str or "503" in error_str or "UNAVAILABLE" in error_str:
+            raise LLMRetryableError(error_str) from e
+        raise
 
 
 def _format_ticket(event: SupportTicketEvent) -> str:
