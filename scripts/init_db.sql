@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS triage_results (
     urgency         TEXT NOT NULL,
     suggested_action TEXT NOT NULL,
     draft_response  TEXT,
+    language        TEXT NOT NULL DEFAULT 'en',
     processed_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

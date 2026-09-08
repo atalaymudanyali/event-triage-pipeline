@@ -18,8 +18,8 @@ def save_triage_result(
                 """
                 INSERT INTO triage_results
                     (event_id, customer_name, customer_email, subject, message,
-                     category, urgency, suggested_action, draft_response)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     category, urgency, suggested_action, draft_response, language)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (event_id) DO NOTHING
                 """,
                 (
@@ -32,6 +32,7 @@ def save_triage_result(
                     result.urgency.value,
                     result.suggested_action.value,
                     result.draft_response,
+                    result.language,
                 ),
             )
             inserted = cur.rowcount > 0

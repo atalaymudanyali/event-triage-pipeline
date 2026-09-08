@@ -3,9 +3,9 @@ import sys
 
 from confluent_kafka import Consumer, KafkaError
 
+from triage_pipeline.agent import triage_ticket
 from triage_pipeline.config import settings
 from triage_pipeline.db import save_triage_result
-from triage_pipeline.llm import triage_ticket
 from triage_pipeline.models import SupportTicketEvent
 
 
