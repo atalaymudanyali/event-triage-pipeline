@@ -464,3 +464,26 @@ Mocking `_call_gemini` and asserting the pipeline wires steps together would tes
 **If an interviewer asks:** "How would you test the retry/backoff logic without hitting rate limits?" Answer: "You'd inject the LLM client as a dependency and use a fake that raises `LLMRetryableError` N times before succeeding. Then assert that the function retried the expected number of times using tenacity's statistics — `_call_gemini.retry.statistics['attempt_number']`. This tests the retry configuration without needing any external service."
 
 **If an interviewer asks:** "Your API tests don't test the database endpoints — why?" Answer: "The `/events` and `/stats` endpoints require a running Postgres with the schema applied. That's an integration test, not a unit test. We test the health endpoint and OpenAPI schema (pure application logic) here, and test database queries separately during live pipeline testing. In V2, a Docker-based test fixture could spin up Postgres for CI."
+
+---
+
+## V2 Commits
+
+### Commit: Prometheus metrics module
+
+**What:** Added `prometheus-client` dependency and created `metrics.py` — a dedicated module defining all six Prometheus metrics the pipeline will expose: event counters, triage duration histograms, error/retry/DLT counters, and DB save latency.
+
+**Key concepts:**
+- **Prometheus** is a pull-based monitoring system. Instead of your application pushing metrics to a server, Prometheus *scrapes* an HTTP endpoint (`/metrics`) on your app at regular intervals. This decouples your app from the monitoring infrastructure — if Prometheus goes down, your app keeps running.
+- **Counter** is a monotonically increasing value — it only goes up. "Total events processed" is a counter. You never reset it; Prometheus calculates *rate* (events/second) by comparing values across scrapes. `rate(triage_events_processed_total[5m])` gives you the per-second processing rate over the last 5 minutes.
+- **Histogram** records observations (like request durations) into configurable buckets. For `triage_duration_seconds` with buckets `(0.5, 1, 2, 5, 10, 20, 30, 60)`, Prometheus counts how many observations fell below each threshold. From this, you can compute percentiles: `histogram_quantile(0.95, ...)` gives p95 latency.
+- **Labels** add dimensions to metrics. `EVENTS_PROCESSED` has labels `category` and `urgency`, so you can query `triage_events_processed_total{category="payment_problem"}` to see just payment issues. Labels are powerful but expensive — each unique label combination creates a new time series.
+- **Why a dedicated module?** `prometheus-client` uses a global registry. Each metric must be registered exactly once per process. Python's module import cache guarantees `metrics.py` runs once — importing it from `consumer.py` and `agent.py` returns the same objects. If you defined metrics inline in each file, you'd risk duplicate registration errors.
+
+**Design decision: Why custom histogram buckets instead of defaults?**
+
+The default Prometheus buckets (`0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10`) are tuned for HTTP request latencies (milliseconds to low seconds). Our LLM calls take 1–10 seconds, so the default buckets would lump everything into the last two bins. Custom buckets `(0.5, 1, 2, 5, 10, 20, 30, 60)` spread the range where our data actually lives. For DB saves, which are sub-second, we use finer-grained buckets `(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1)`.
+
+**If an interviewer asks:** "Why Prometheus over something like Datadog or CloudWatch?" Answer: "Prometheus is open-source, runs locally, and is the standard for Kubernetes monitoring (it's a CNCF graduated project). For a portfolio project, it shows you understand the industry-standard observability stack. In production, you'd often pair Prometheus with Thanos or Cortex for long-term storage, or use a managed service like Grafana Cloud."
+
+**If an interviewer asks:** "What's the difference between push-based and pull-based monitoring?" Answer: "Push-based (like StatsD) means the app sends metrics to a server. Pull-based (Prometheus) means the server scrapes the app. Pull is simpler — your app just exposes an HTTP endpoint, and if the monitoring server goes down, the app doesn't need retry logic or a buffer. Pull also lets Prometheus discover targets dynamically (service discovery in Kubernetes)."
