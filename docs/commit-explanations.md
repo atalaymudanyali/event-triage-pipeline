@@ -561,3 +561,23 @@ Row 5 — API:          Request Rate by Endpoint | API Latency (p95)
 The README is the first thing a recruiter or interviewer sees. If it says "V0 (current)" while the code is at V2, it signals neglect. Updating the README per version keeps the documentation honest and shows attention to communication — a skill that matters as much as the code itself in a portfolio project.
 
 **If an interviewer asks:** "Walk me through the observability stack." Answer: "The consumer and API expose Prometheus metrics on ports 8001 and 8000. Prometheus scrapes both every 5 seconds and stores time series. Grafana connects to Prometheus and renders a pre-built dashboard with 12 panels — stat tiles for throughput, histograms for latency broken down by LLM step, pie charts for classification distribution, and time series for errors and API performance. Everything is provisioned as code — `docker compose up -d` gives you the full stack with no manual configuration."
+
+---
+
+## V3 Commits
+
+### Commit: Backend — tickets table, new API endpoints, CORS
+
+**What:** Added a `tickets` table for frontend-driven ticket management, six new DB functions, six new `/api/tickets/*` endpoints, a `CreateTicketRequest` model, and CORS middleware. The existing Kafka-based endpoints remain unchanged.
+
+**Key concepts:**
+- **Two data paths, one AI pipeline** — the Kafka path (producer → Redpanda → consumer) and the API path (frontend → `/api/tickets` → Postgres) both end up calling the same `triage_ticket()` function. The difference is how tickets arrive and where state is tracked. Kafka is for autonomous stream processing; the API is for interactive use.
+- **CORS (Cross-Origin Resource Sharing)** — browsers block requests from one origin (e.g. `localhost:5173`) to another (`localhost:8000`) by default. `CORSMiddleware` adds the `Access-Control-Allow-Origin` header so the Vite dev server can call the FastAPI backend. Without it, every frontend fetch call would fail silently.
+- **Status state machine** — tickets move through `pending → processing → processed` (or `pending → processing → failed`). The `processing` state prevents double-clicks: if a ticket is already being triaged, the UI knows not to send another request.
+- **Route ordering** — `/api/tickets/stats` is registered before `/api/tickets/{event_id}` so FastAPI doesn't capture "stats" as an event_id path parameter. Order matters with path parameters.
+
+**Design decision: Why skip Kafka for frontend tickets?**
+
+Kafka is designed for asynchronous, decoupled event processing — not for request-response workflows. If the frontend published to Kafka and then polled the database waiting for the consumer to process the ticket, you'd have unnecessary complexity and unpredictable latency. Calling `triage_ticket()` directly from the API gives the frontend a synchronous response. The Kafka path still exists for the autonomous producer/consumer demo.
+
+**If an interviewer asks:** "Isn't it bad to have two data paths?" Answer: "It's the right trade-off. The Kafka path is for production-style autonomous processing where you want decoupling, backpressure, and at-least-once delivery. The API path is for interactive use where you want immediate feedback. They share the same AI pipeline (`triage_ticket()`), so there's no business logic duplication. In a real system, you might have both: a Kafka consumer for bulk processing and an API for customer-facing ticket submission."

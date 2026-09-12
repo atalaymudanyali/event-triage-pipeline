@@ -5,18 +5,37 @@ import time
 import uvicorn
 from confluent_kafka import Producer
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import Counter, Histogram, make_asgi_app
 
+from triage_pipeline.agent import triage_ticket
 from triage_pipeline.config import settings
-from triage_pipeline.db import get_recent_results, get_stats
-from triage_pipeline.models import SupportTicketEvent
+from triage_pipeline.db import (
+    create_ticket,
+    get_recent_results,
+    get_stats,
+    get_ticket,
+    get_ticket_stats,
+    get_tickets,
+    update_ticket_result,
+    update_ticket_status,
+)
+from triage_pipeline.models import CreateTicketRequest, SupportTicketEvent
+from triage_pipeline.producer import generate_ticket
 
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Triage Pipeline API",
     description="Inspect pipeline state, view triage results, and submit test events.",
-    version="1.0.0",
+    version="2.0.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://localhost:8000"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 metrics_app = make_asgi_app()
@@ -90,6 +109,73 @@ def submit_event(event: SupportTicketEvent):
 
     logger.info("[%s] Event submitted via API: %s", event.event_id[:8], event.subject)
     return {"event_id": event.event_id, "status": "published"}
+
+
+# --- Tickets API (frontend-driven, skips Kafka) ---
+
+
+@app.post("/api/tickets", status_code=201)
+def api_create_ticket(req: CreateTicketRequest):
+    event = SupportTicketEvent(
+        customer_name=req.customer_name,
+        customer_email=req.customer_email,
+        subject=req.subject,
+        message=req.message,
+    )
+    ticket = create_ticket(event)
+    return ticket
+
+
+@app.post("/api/tickets/generate", status_code=201)
+def api_generate_ticket():
+    event = generate_ticket()
+    ticket = create_ticket(event)
+    return ticket
+
+
+@app.get("/api/tickets")
+def api_list_tickets(status: str | None = None, limit: int = 50):
+    return get_tickets(status=status, limit=min(limit, 200))
+
+
+@app.get("/api/tickets/stats")
+def api_ticket_stats():
+    return get_ticket_stats()
+
+
+@app.get("/api/tickets/{event_id}")
+def api_get_ticket(event_id: str):
+    ticket = get_ticket(event_id)
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    return ticket
+
+
+@app.post("/api/tickets/{event_id}/process")
+def api_process_ticket(event_id: str):
+    ticket = get_ticket(event_id)
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    if ticket["status"] == "processed":
+        raise HTTPException(status_code=400, detail="Ticket already processed")
+
+    update_ticket_status(event_id, "processing")
+
+    event = SupportTicketEvent(
+        event_id=ticket["event_id"],
+        customer_name=ticket["customer_name"],
+        customer_email=ticket["customer_email"],
+        subject=ticket["subject"],
+        message=ticket["message"],
+    )
+
+    try:
+        result = triage_ticket(event)
+        update_ticket_result(event_id, result)
+        return get_ticket(event_id)
+    except Exception as e:
+        update_ticket_status(event_id, "failed")
+        raise HTTPException(status_code=502, detail=f"Triage failed: {e}") from e
 
 
 def start():

@@ -65,3 +65,10 @@ class TriageResult(BaseModel):
     draft_response: str | None = None
     reasoning: str
     language: str = "en"
+
+
+class CreateTicketRequest(BaseModel):
+    customer_name: str
+    customer_email: str
+    subject: str
+    message: str
