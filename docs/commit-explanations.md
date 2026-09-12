@@ -638,3 +638,20 @@ frontend/src/
 For a portfolio project running locally, adding Nginx adds infrastructure complexity without proportional benefit. In production you'd absolutely put Nginx or a cloud load balancer in front, but for a demo that runs with `docker compose up && uv run api`, having FastAPI serve the frontend is the simplest deployment story. The code is guarded by the `is_dir()` check, so it's zero-cost when not building the frontend.
 
 **If an interviewer asks:** "How would you deploy this differently in production?" Answer: "I'd put Nginx in front — it serves static assets directly with proper caching headers and proxies `/api/*` to FastAPI. The frontend build would run in a multi-stage Docker build, and the static files would go into the Nginx container. FastAPI would only handle API requests, which is better for performance since it doesn't need to serve JS/CSS. The SPA fallback would move to an Nginx `try_files` directive."
+
+---
+
+### Commit: V3 tests and commit explanations
+
+**What:** Added `test_tickets_api.py` with 10 tests covering all six `/api/tickets/*` endpoints — create, generate, list, stats, detail, and process — including validation and error cases. Updated commit explanations for all V3 commits.
+
+**Key concepts:**
+- **Mocking DB functions at the API layer** — the tests patch `triage_pipeline.api.create_ticket` (the imported name in the API module), not `triage_pipeline.db.create_ticket` (the source). This is a common Python testing pattern: you mock where a function is *used*, not where it's *defined*, because the API module has already imported its own reference.
+- **Testing error paths** — `test_process_already_processed_400` verifies that re-processing a completed ticket returns 400, and `test_process_missing_ticket_404` verifies the not-found case. These tests confirm the status state machine is enforced at the API level.
+- **Testing validation** — `test_create_rejects_missing_fields` sends an incomplete JSON body and expects 422 (FastAPI's Pydantic validation). This proves the `CreateTicketRequest` model enforces required fields without writing custom validation code.
+
+**Design decision: Why mock the DB instead of using a test database?**
+
+The API tests verify routing, request validation, status codes, and response shapes — not database behavior. Mocking the DB functions keeps tests fast (no Postgres needed), isolated (no shared state between tests), and focused on what the API layer actually does. Integration tests that hit a real database would go in a separate test suite, gated behind a marker like `@pytest.mark.integration`.
+
+**If an interviewer asks:** "How do you know the pipeline actually works end-to-end if everything is mocked?" Answer: "These are unit tests — they verify each layer in isolation. The consumer tests mock the LLM, the API tests mock the DB. End-to-end verification happens manually: `docker compose up`, submit a ticket through the frontend, watch it get triaged. In a production CI pipeline, I'd add integration tests that start real containers (Testcontainers or docker compose in CI) and run the full flow. But for a portfolio project, the manual demo is the integration test."
