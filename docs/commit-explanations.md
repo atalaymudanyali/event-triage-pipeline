@@ -510,3 +510,38 @@ The custom middleware is ~15 lines using only `prometheus-client` (already insta
 The consumer and API run as separate processes. HTTP metrics only apply to the API process — putting them in `metrics.py` would register them in the consumer too, creating empty time series that Prometheus scrapes for no reason. Pipeline metrics (events, triage duration) go in `metrics.py` because they're used by both consumer and agent. HTTP metrics stay local to `api.py`.
 
 **If an interviewer asks:** "How would you add consumer lag monitoring?" Answer: "Consumer lag (how far behind the consumer is from the latest message) is best tracked at the broker level. Redpanda exposes consumer group lag via its admin API. You'd either scrape Redpanda's built-in Prometheus metrics, or use a dedicated exporter like `kafka-lag-exporter`. Application-level lag tracking is unreliable because the consumer can't see messages it hasn't polled yet."
+
+---
+
+### Commit: Prometheus and Grafana in Docker Compose with pre-built dashboard
+
+**What:** Added Prometheus (port 9090) and Grafana (port 3000) to Docker Compose. Prometheus scrapes both the consumer metrics server (port 8001) and the FastAPI `/metrics` endpoint (port 8000). Grafana starts with a pre-provisioned datasource and a 12-panel dashboard covering throughput, latency, errors, classification distribution, and API performance.
+
+**Key concepts:**
+- **Prometheus pull model** — Prometheus runs in a Docker container and reaches out to your Python processes every 5 seconds. The `scrape_configs` in `prometheus.yml` list the targets (host + port). Each scrape hits the `/metrics` HTTP endpoint, parses the text-based exposition format, and stores the time series in its local TSDB (time-series database).
+- **`host.docker.internal`** — Docker containers can't reach `localhost` on the host machine (that's the container's own localhost). On Windows and Mac, Docker Desktop automatically resolves `host.docker.internal` to the host IP. On Linux, the `extra_hosts: ["host.docker.internal:host-gateway"]` directive in Docker Compose does the same thing.
+- **Grafana provisioning** — instead of manually clicking through the Grafana UI to add a datasource and import a dashboard, provisioning config files in `/etc/grafana/provisioning/` automate this at startup. The datasource YAML points Grafana to `http://prometheus:9090` (Docker service name, resolved via Docker DNS). The dashboard provider YAML tells Grafana where to find JSON dashboard files.
+- **Dashboard JSON** — Grafana dashboards are JSON documents describing panels, their PromQL queries, and layout. Exporting dashboards as JSON and storing them in version control is called "dashboards as code" — you can reproduce the exact same dashboard in any environment.
+- **`GF_AUTH_ANONYMOUS_ENABLED`** — enables anonymous access to Grafana. Without it, you'd need to log in (default admin/admin). For a local dev environment and portfolio demos, anonymous Viewer access removes friction.
+
+**The dashboard panels:**
+```
+Row 1 — Overview:     Events Processed | Processing Rate | Error Rate | DLT Events
+Row 2 — Performance:  Triage Duration by Step (p50/p95) | DB Save Duration
+Row 3 — Distribution: Events by Category (donut) | Events by Urgency (donut)
+Row 4 — Errors:       Errors by Type | Retries Over Time
+Row 5 — API:          Request Rate by Endpoint | API Latency (p95)
+```
+
+**Key PromQL queries explained:**
+- `rate(triage_events_processed_total[5m])` — per-second rate of events processed, averaged over 5 minutes. `rate()` handles counter resets (process restarts) automatically.
+- `histogram_quantile(0.95, sum by(le, step) (rate(triage_duration_seconds_bucket[5m])))` — the 95th percentile triage duration, broken down by step. `le` (less-than-or-equal) is the bucket boundary label that histograms use; `histogram_quantile` interpolates between buckets.
+- Error rate formula divides errors by (events + errors) to get a 0–1 ratio. The `+ 1e-10` prevents division by zero when there's no traffic.
+
+**Design decision: Why pin Prometheus and Grafana image versions?**
+
+`prom/prometheus:v3.4.0` instead of `prom/prometheus:latest`. In production, `:latest` can break your setup when a new major version ships with breaking config changes. Pinned versions make `docker compose up` deterministic — the same config works the same way months later.
+
+**If an interviewer asks:** "How would you alert on high error rates?" Answer: "Two options: (1) Prometheus alerting rules — define a rule like `rate(triage_errors_total[5m]) > 0.1` in a rules YAML file, and configure Alertmanager to send notifications (Slack, PagerDuty, email). (2) Grafana alerting — set alert conditions directly on dashboard panels. Prometheus alerting is more robust (survives Grafana downtime), but Grafana alerting is easier to set up for a small team."
+
+**If an interviewer asks:** "What happens to metrics when the consumer restarts?" Answer: "Counters reset to zero. Prometheus handles this with `rate()` — it detects the reset (value decreases) and adjusts the calculation. Histograms behave the same way. This is why you always use `rate()` on counters instead of raw values — raw values show misleading drops on restart."
