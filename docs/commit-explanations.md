@@ -581,3 +581,42 @@ The README is the first thing a recruiter or interviewer sees. If it says "V0 (c
 Kafka is designed for asynchronous, decoupled event processing — not for request-response workflows. If the frontend published to Kafka and then polled the database waiting for the consumer to process the ticket, you'd have unnecessary complexity and unpredictable latency. Calling `triage_ticket()` directly from the API gives the frontend a synchronous response. The Kafka path still exists for the autonomous producer/consumer demo.
 
 **If an interviewer asks:** "Isn't it bad to have two data paths?" Answer: "It's the right trade-off. The Kafka path is for production-style autonomous processing where you want decoupling, backpressure, and at-least-once delivery. The API path is for interactive use where you want immediate feedback. They share the same AI pipeline (`triage_ticket()`), so there's no business logic duplication. In a real system, you might have both: a Kafka consumer for bulk processing and an API for customer-facing ticket submission."
+
+---
+
+### Commit: Frontend — React app with customer and admin views
+
+**What:** Created a React + Vite frontend with two views: a customer view for submitting support tickets and looking up their status, and an admin dashboard for monitoring tickets, generating synthetic data, and triggering AI triage processing.
+
+**Key concepts:**
+- **Vite** is a modern frontend build tool. Unlike Webpack, it serves source files as native ES modules during development (instant startup), and uses Rollup for optimized production builds. The `vite.config.js` proxy routes `/api/*` requests to the FastAPI backend so the frontend can call the API without CORS issues during development.
+- **React Router** (`react-router-dom`) handles client-side routing — the browser URL changes (`/` and `/admin`) without full page reloads. `BrowserRouter` wraps the app, `Routes`/`Route` map paths to components, and `Link` renders navigation anchors that trigger client-side transitions.
+- **Controlled components** — every form input's value is bound to React state (`value={form.subject}` + `onChange`). This means React owns the form data at all times, making validation, submission, and clearing straightforward.
+- **CSS custom properties (variables)** — defining colors as `--accent`, `--bg-card`, etc. on `:root` means the entire theme can be changed by redefining a handful of values. The dark mode support uses `prefers-color-scheme` media query and `data-theme` attribute, with tokens redefined in both blocks.
+
+**Design decision: Why two separate views instead of a single dashboard?**
+
+In a real support system, customers and agents have different needs and permissions. Customers submit tickets and check status — they should never see the admin controls for processing or generating synthetic tickets. Splitting into `CustomerView` and `AdminView` mirrors this separation. For a portfolio project, it also demonstrates React Router and multi-page SPA architecture.
+
+**Design decision: Why no "Process All" button?**
+
+Gemini's free tier has a 5 requests-per-minute rate limit. Each ticket triggers 3 LLM calls (classify → urgency → draft response). Processing two tickets back-to-back would hit the rate limit. The per-row "Process" button forces manual, one-at-a-time triage — which is the right UX for a rate-limited API. In production with a paid tier, you'd add a batch processing feature.
+
+**File structure and component hierarchy:**
+```
+frontend/src/
+├── main.jsx              ← Entry point: mounts <App /> inside <BrowserRouter>
+├── App.jsx               ← Layout: nav bar + <Routes> mapping / and /admin
+├── App.css               ← All styles, CSS custom properties, dark mode
+├── api.js                ← Fetch wrapper: createTicket, processTicket, etc.
+├── pages/
+│   ├── CustomerView.jsx  ← Ticket form + status lookup by event_id
+│   └── AdminView.jsx     ← Stats cards + generate button + ticket table
+└── components/
+    ├── TicketForm.jsx    ← Controlled form with name/email/subject/message
+    ├── TicketTable.jsx   ← Expandable rows with per-row Process button
+    ├── TicketDetail.jsx  ← Expanded view: badges, draft response, reasoning
+    └── StatusBadge.jsx   ← Color-coded pill for status/urgency/category
+```
+
+**If an interviewer asks:** "Why React instead of a server-rendered template?" Answer: "The admin dashboard needs interactive updates — clicking Process triggers a 5-30 second API call and should show a loading spinner, then update the row without refreshing the page. The ticket table has expandable rows. The stats cards should refresh on demand. These are all client-side state management patterns that React handles naturally. A server-rendered page with HTMX could work, but React is the industry standard for dashboard UIs and demonstrates a broader skill set for a portfolio project."
