@@ -44,46 +44,32 @@ Demonstrates the event-driven architecture pattern used by companies like Trendy
 ## Quick Start
 
 ```bash
-# 1. Start infrastructure (Redpanda, Postgres, Prometheus, Grafana)
-docker compose up -d
-
-# 2. Install dependencies
-uv sync
-
-# 3. Set up your Gemini API key (free at https://aistudio.google.com/apikey)
+# 1. Set up your Gemini API key (free at https://aistudio.google.com/apikey)
 cp .env.example .env
 # Edit .env and add your GEMINI_API_KEY
 
-# 4. Initialize the database (both tables)
-psql -h localhost -p 5433 -U postgres -d triage -f scripts/init_db.sql
+# 2. Start everything (Redpanda, Postgres, API + frontend, Prometheus, Grafana)
+docker compose up -d --build
+```
 
-# 5. Run the API (serves both backend and frontend)
-uv run api
+That's it. Open [http://localhost:8000](http://localhost:8000) for the dashboard and [http://localhost:3000](http://localhost:3000) for Grafana.
 
-# 6. (Optional) Run the Kafka consumer for autonomous processing
+```bash
+# (Optional) Run the Kafka consumer for autonomous processing
+uv sync
 uv run consume
 
-# 7. (Optional) Run the producer to generate Kafka events
+# (Optional) Run the producer to generate Kafka events
 uv run produce
 ```
 
 ### Frontend Development
 
 ```bash
-# For hot-reload development:
-cd frontend
-npm install
-npm run dev        # Vite dev server on :5173, proxies /api/* to :8000
+# For hot-reload development (requires uv sync first):
+uv run api                        # API on :8000
+cd frontend && npm install && npm run dev   # Vite on :5173, proxies /api/* to :8000
 ```
-
-```bash
-# For production (served by FastAPI):
-cd frontend
-npm run build      # outputs to frontend/dist/
-uv run api         # FastAPI serves the built frontend at :8000
-```
-
-**Dashboard:** Open [http://localhost:5173](http://localhost:5173) (dev) or [http://localhost:8000](http://localhost:8000) (production).
 
 **Grafana:** Open [http://localhost:3000](http://localhost:3000) — no login required.
 

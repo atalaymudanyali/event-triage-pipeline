@@ -655,3 +655,21 @@ For a portfolio project running locally, adding Nginx adds infrastructure comple
 The API tests verify routing, request validation, status codes, and response shapes — not database behavior. Mocking the DB functions keeps tests fast (no Postgres needed), isolated (no shared state between tests), and focused on what the API layer actually does. Integration tests that hit a real database would go in a separate test suite, gated behind a marker like `@pytest.mark.integration`.
 
 **If an interviewer asks:** "How do you know the pipeline actually works end-to-end if everything is mocked?" Answer: "These are unit tests — they verify each layer in isolation. The consumer tests mock the LLM, the API tests mock the DB. End-to-end verification happens manually: `docker compose up`, submit a ticket through the frontend, watch it get triaged. In a production CI pipeline, I'd add integration tests that start real containers (Testcontainers or docker compose in CI) and run the full flow. But for a portfolio project, the manual demo is the integration test."
+
+---
+
+### Commit: Dockerize API with multi-stage build
+
+**What:** Added a multi-stage Dockerfile that builds the React frontend with Node and packages the Python API with uv, so `docker compose up -d --build` starts the entire stack — infrastructure, API, frontend, and observability — with a single command. Updated docker-compose to include the API service and Prometheus to scrape it by container name.
+
+**Key concepts:**
+- **Multi-stage Docker build** — stage 1 (`node:22-alpine`) runs `npm ci` and `npm run build` to produce the Vite production bundle. Stage 2 (`uv:python3.12-bookworm-slim`) installs Python dependencies and copies the built frontend from stage 1 via `COPY --from=frontend`. The final image has no Node.js, no `node_modules`, no source JSX — only the compiled assets and the Python runtime.
+- **Docker networking** — containers on the same Compose network resolve each other by service name. The API container uses `POSTGRES_HOST=postgres` and `KAFKA_BOOTSTRAP_SERVERS=redpanda:9092` (internal port, not the host-mapped one). Prometheus scrapes `triage-api:8000` instead of `host.docker.internal:8000`.
+- **`env_file: .env`** — Docker Compose reads the `.env` file and injects all variables as environment variables into the container. pydantic-settings picks these up automatically, so the same config module works locally and in Docker.
+- **`.dockerignore`** — excludes `.venv/`, `node_modules/`, `.git/`, and `frontend/dist/` from the build context. Without this, Docker would send hundreds of megabytes of unnecessary files to the daemon on every build.
+
+**Design decision: Why override `POSTGRES_PORT` in the container?**
+
+Locally, Postgres maps `5433:5432` so it doesn't conflict with any local Postgres. But inside Docker, the API talks to Postgres directly on the internal network — port 5432 (the default Postgres port). The `environment` block in docker-compose overrides `POSTGRES_HOST` and `POSTGRES_PORT` so the same config works in both contexts without changing the `.env` file.
+
+**If an interviewer asks:** "Why not use Docker for consume/produce too?" Answer: "The consumer and producer are interactive demo tools — you run them in a terminal, watch the logs, and stop them manually. Putting them in Docker would hide the output and make the demo less visible. The API is different: it's a long-running server that should start automatically with the infrastructure. In production, you'd containerize everything, but for a portfolio demo, keeping consume/produce as local commands lets you show the event-driven flow in real time."
