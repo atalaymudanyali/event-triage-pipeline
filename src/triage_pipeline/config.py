@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     kafka_dlt_topic: str = "support-tickets-dlt"
     max_retries: int = 3
 
+    metrics_port: int = 8001
+
     postgres_host: str = "localhost"
     postgres_port: int = 5433
     postgres_db: str = "triage"

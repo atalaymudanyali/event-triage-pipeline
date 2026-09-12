@@ -1,11 +1,21 @@
 import json
 import logging
+import time
 
 from confluent_kafka import Consumer, KafkaError, Producer
+from prometheus_client import start_http_server
 
 from triage_pipeline.agent import triage_ticket
 from triage_pipeline.config import settings
 from triage_pipeline.db import save_triage_result
+from triage_pipeline.metrics import (
+    DB_SAVE_DURATION,
+    DLT_EVENTS,
+    EVENTS_PROCESSED,
+    TRIAGE_DURATION,
+    TRIAGE_ERRORS,
+    TRIAGE_RETRIES,
+)
 from triage_pipeline.models import SupportTicketEvent
 
 logging.basicConfig(
@@ -44,6 +54,8 @@ def main():
     dlt_producer = Producer({"bootstrap.servers": settings.kafka_bootstrap_servers})
     retry_counts: dict[str, int] = {}
 
+    start_http_server(settings.metrics_port)
+    logger.info("Metrics server started on port %d", settings.metrics_port)
     logger.info("Consuming from topic '%s'", settings.kafka_topic)
     logger.info("Broker: %s | Model: %s", settings.kafka_bootstrap_servers, settings.gemini_model)
     logger.info("Max retries before DLT: %d", settings.max_retries)
@@ -69,13 +81,21 @@ def main():
             )
 
             try:
+                t0 = time.monotonic()
                 result = triage_ticket(event)
+                TRIAGE_DURATION.labels(step="total").observe(time.monotonic() - t0)
             except Exception as e:
+                err_str = str(e)
+                is_retryable = "429" in err_str or "503" in err_str
+                error_type = "llm_retryable" if is_retryable else "llm_permanent"
+                TRIAGE_ERRORS.labels(error_type=error_type).inc()
+                TRIAGE_RETRIES.inc()
                 retries = retry_counts.get(event.event_id, 0) + 1
                 retry_counts[event.event_id] = retries
 
                 if retries >= settings.max_retries:
                     _send_to_dlt(dlt_producer, event, str(e))
+                    DLT_EVENTS.inc()
                     retry_counts.pop(event.event_id, None)
                     consumer.commit(message=msg)
                 else:
@@ -87,13 +107,19 @@ def main():
 
             retry_counts.pop(event.event_id, None)
 
+            EVENTS_PROCESSED.labels(
+                category=result.category.value,
+                urgency=result.urgency.value,
+            ).inc()
+
             logger.info(
                 "[%s] Result: %s | %s | %s",
                 event.event_id[:8], result.category.value, result.urgency.value,
                 result.suggested_action.value,
             )
 
-            saved = save_triage_result(event, result)
+            with DB_SAVE_DURATION.time():
+                saved = save_triage_result(event, result)
             if saved:
                 logger.info("[%s] Saved to database", event.event_id[:8])
             else:

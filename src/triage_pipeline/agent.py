@@ -12,6 +12,7 @@ from tenacity import (
 )
 
 from triage_pipeline.config import settings
+from triage_pipeline.metrics import TRIAGE_DURATION
 from triage_pipeline.models import (
     ClassificationResult,
     DraftResponse,
@@ -142,9 +143,12 @@ def step_draft_response(
 
 
 def triage_ticket(event: SupportTicketEvent) -> TriageResult:
-    classification = step_classify(event)
-    urgency = step_assess_urgency(event, classification)
-    draft = step_draft_response(event, classification, urgency)
+    with TRIAGE_DURATION.labels(step="classify").time():
+        classification = step_classify(event)
+    with TRIAGE_DURATION.labels(step="urgency").time():
+        urgency = step_assess_urgency(event, classification)
+    with TRIAGE_DURATION.labels(step="draft").time():
+        draft = step_draft_response(event, classification, urgency)
 
     return TriageResult(
         event_id=event.event_id,

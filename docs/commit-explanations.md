@@ -487,3 +487,26 @@ The default Prometheus buckets (`0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.
 **If an interviewer asks:** "Why Prometheus over something like Datadog or CloudWatch?" Answer: "Prometheus is open-source, runs locally, and is the standard for Kubernetes monitoring (it's a CNCF graduated project). For a portfolio project, it shows you understand the industry-standard observability stack. In production, you'd often pair Prometheus with Thanos or Cortex for long-term storage, or use a managed service like Grafana Cloud."
 
 **If an interviewer asks:** "What's the difference between push-based and pull-based monitoring?" Answer: "Push-based (like StatsD) means the app sends metrics to a server. Pull-based (Prometheus) means the server scrapes the app. Pull is simpler — your app just exposes an HTTP endpoint, and if the monitoring server goes down, the app doesn't need retry logic or a buffer. Pull also lets Prometheus discover targets dynamically (service discovery in Kubernetes)."
+
+---
+
+### Commit: Instrument consumer, agent, and API with metrics
+
+**What:** Wired all six Prometheus metrics into the actual processing code. The consumer starts a metrics HTTP server on port 8001, tracks event counts, triage duration, errors, retries, DLT sends, and DB save latency. The agent records per-step LLM timing (classify, urgency, draft). The FastAPI app exposes `/metrics` and tracks HTTP request count and duration via custom middleware.
+
+**Key concepts:**
+- **`start_http_server(port)`** from `prometheus_client` starts a background thread serving the `/metrics` endpoint. The consumer uses this because it has no HTTP server of its own. The API already has one (FastAPI/uvicorn), so it mounts a Prometheus ASGI app at `/metrics` instead.
+- **`.time()` context manager** — `TRIAGE_DURATION.labels(step="classify").time()` automatically records how long the block takes. If the block raises an exception, the duration is still recorded — important for tracking slow failures.
+- **`time.monotonic()`** — used for the total triage duration in the consumer. Unlike `time.time()`, monotonic clocks never go backwards (no daylight saving jumps, no NTP corrections). Always use monotonic for measuring elapsed time.
+- **`make_asgi_app()`** — creates an ASGI application from the default Prometheus registry. Mounting it on FastAPI at `/metrics` means both the pipeline metrics (from `metrics.py`) and the HTTP metrics (defined in `api.py`) are served from the same endpoint.
+- **HTTP middleware** — FastAPI middleware wraps every request. Ours measures request duration and counts requests by method/endpoint/status. It skips `/metrics` requests to avoid self-referential counting (Prometheus scraping would inflate the count).
+
+**Design decision: Why custom middleware instead of `prometheus-fastapi-instrumentator`?**
+
+The custom middleware is ~15 lines using only `prometheus-client` (already installed). Adding another dependency for 4 endpoints would be over-engineering. More importantly, writing middleware from scratch demonstrates understanding of the request lifecycle — something interviewers value over knowing which library to `pip install`.
+
+**Design decision: Why define HTTP metrics in `api.py` instead of `metrics.py`?**
+
+The consumer and API run as separate processes. HTTP metrics only apply to the API process — putting them in `metrics.py` would register them in the consumer too, creating empty time series that Prometheus scrapes for no reason. Pipeline metrics (events, triage duration) go in `metrics.py` because they're used by both consumer and agent. HTTP metrics stay local to `api.py`.
+
+**If an interviewer asks:** "How would you add consumer lag monitoring?" Answer: "Consumer lag (how far behind the consumer is from the latest message) is best tracked at the broker level. Redpanda exposes consumer group lag via its admin API. You'd either scrape Redpanda's built-in Prometheus metrics, or use a dedicated exporter like `kafka-lag-exporter`. Application-level lag tracking is unreliable because the consumer can't see messages it hasn't polled yet."

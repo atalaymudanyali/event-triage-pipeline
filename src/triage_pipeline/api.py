@@ -1,9 +1,11 @@
 import json
 import logging
+import time
 
 import uvicorn
 from confluent_kafka import Producer
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from prometheus_client import Counter, Histogram, make_asgi_app
 
 from triage_pipeline.config import settings
 from triage_pipeline.db import get_recent_results, get_stats
@@ -16,6 +18,40 @@ app = FastAPI(
     description="Inspect pipeline state, view triage results, and submit test events.",
     version="1.0.0",
 )
+
+metrics_app = make_asgi_app()
+app.mount("/metrics", metrics_app)
+
+HTTP_REQUEST_COUNT = Counter(
+    "http_requests_total",
+    "Total HTTP requests",
+    ["method", "endpoint", "status"],
+)
+
+HTTP_REQUEST_DURATION = Histogram(
+    "http_request_duration_seconds",
+    "HTTP request duration",
+    ["method", "endpoint"],
+)
+
+
+@app.middleware("http")
+async def metrics_middleware(request: Request, call_next):
+    if request.url.path.startswith("/metrics"):
+        return await call_next(request)
+    t0 = time.monotonic()
+    response = await call_next(request)
+    duration = time.monotonic() - t0
+    HTTP_REQUEST_COUNT.labels(
+        method=request.method,
+        endpoint=request.url.path,
+        status=response.status_code,
+    ).inc()
+    HTTP_REQUEST_DURATION.labels(
+        method=request.method,
+        endpoint=request.url.path,
+    ).observe(duration)
+    return response
 
 
 @app.get("/health")
