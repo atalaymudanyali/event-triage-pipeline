@@ -1,11 +1,14 @@
 import json
 import logging
 import time
+from pathlib import Path
 
 import uvicorn
 from confluent_kafka import Producer
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from prometheus_client import Counter, Histogram, make_asgi_app
 
 from triage_pipeline.agent import triage_ticket
@@ -176,6 +179,25 @@ def api_process_ticket(event_id: str):
     except Exception as e:
         update_ticket_status(event_id, "failed")
         raise HTTPException(status_code=502, detail=f"Triage failed: {e}") from e
+
+
+FRONTEND_DIST = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
+
+if FRONTEND_DIST.is_dir():
+    app.mount("/assets", StaticFiles(directory=FRONTEND_DIST / "assets"), name="static")
+
+    _index_html = FRONTEND_DIST / "index.html"
+
+    @app.middleware("http")
+    async def spa_fallback(request: Request, call_next):
+        response = await call_next(request)
+        if (
+            response.status_code == 404
+            and request.method == "GET"
+            and not request.url.path.startswith(("/api/", "/metrics"))
+        ):
+            return FileResponse(_index_html)
+        return response
 
 
 def start():

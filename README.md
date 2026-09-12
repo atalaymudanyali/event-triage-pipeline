@@ -1,6 +1,6 @@
 # Event-Driven AI Triage Pipeline
 
-An event-driven microservices pipeline where an AI agent consumes support ticket events from a message broker (Redpanda), classifies and triages them using an LLM (Gemini), and writes structured decisions to a database (Postgres). Includes Prometheus metrics and a Grafana dashboard for real-time observability.
+An event-driven microservices pipeline where an AI agent consumes support ticket events from a message broker (Redpanda), classifies and triages them using an LLM (Gemini), and writes structured decisions to a database (Postgres). Includes a React dashboard, Prometheus metrics, and a Grafana dashboard for real-time observability.
 
 Demonstrates the event-driven architecture pattern used by companies like Trendyol and Hepsiburada, extended with an AI agent as the consumer.
 
@@ -9,26 +9,36 @@ Demonstrates the event-driven architecture pattern used by companies like Trendy
 ## Architecture
 
 ```
-                                ┌─────────────┐
-                                │  Prometheus  │──── scrapes ──→ :8001 (consumer)
-                                │   :9090      │──── scrapes ──→ :8000 (API /metrics)
-                                └──────┬───────┘
-                                       │
-                                ┌──────▼───────┐
-                                │   Grafana    │
-                                │   :3000      │
-                                └──────────────┘
+                     ┌──────────────┐
+                     │  React UI    │
+                     │  :5173 (dev) │
+                     └──────┬───────┘
+                            │ /api/*
+                            ▼
+[Producer] → [Redpanda] → [AI Consumer] → [Postgres]
+   │            │               │              ▲
+   │       support-tickets  Gemini API         │
+   │                        ┌───┴───┐          │
+   └── synthetic        classify → urgency     │
+       tickets               → draft response  │
+                                               │
+                     [FastAPI :8000] ───────────┘
+                     GET  /events       — Kafka triage results
+                     GET  /stats        — classification stats
+                     POST /events       — submit to Kafka
+                     POST /api/tickets  — create ticket (frontend)
+                     POST /api/tickets/{id}/process — AI triage
+                     GET  /api/tickets  — list tickets
 
-[Producer] → [Redpanda Topic] → [AI Consumer] → [Postgres]
-   │              │                    │              │
-   │         support-tickets      Gemini API     triage results
-   │                               ┌───┴───┐
-   └── synthetic tickets       classify → urgency → draft response
-
-                    [FastAPI :8000]
-                    GET  /events  — recent triage results
-                    GET  /stats   — classification distribution
-                    POST /events  — submit test event
+                     ┌─────────────┐
+                     │ Prometheus  │──── scrapes ──→ :8001 (consumer)
+                     │  :9090      │──── scrapes ──→ :8000 (API /metrics)
+                     └──────┬──────┘
+                            │
+                     ┌──────▼──────┐
+                     │  Grafana    │
+                     │  :3000      │
+                     └─────────────┘
 ```
 
 ## Quick Start
@@ -44,28 +54,62 @@ uv sync
 cp .env.example .env
 # Edit .env and add your GEMINI_API_KEY
 
-# 4. Run the consumer (triages events with AI, starts metrics on :8001)
+# 4. Initialize the database (both tables)
+psql -h localhost -p 5433 -U postgres -d triage -f scripts/init_db.sql
+
+# 5. Run the API (serves both backend and frontend)
+uv run api
+
+# 6. (Optional) Run the Kafka consumer for autonomous processing
 uv run consume
 
-# 5. In another terminal — run the producer (publishes synthetic events)
+# 7. (Optional) Run the producer to generate Kafka events
 uv run produce
-
-# 6. (Optional) Start the API
-uv run api
 ```
 
-**View the dashboard:** Open [http://localhost:3000](http://localhost:3000) — no login required.
+### Frontend Development
+
+```bash
+# For hot-reload development:
+cd frontend
+npm install
+npm run dev        # Vite dev server on :5173, proxies /api/* to :8000
+```
+
+```bash
+# For production (served by FastAPI):
+cd frontend
+npm run build      # outputs to frontend/dist/
+uv run api         # FastAPI serves the built frontend at :8000
+```
+
+**Dashboard:** Open [http://localhost:5173](http://localhost:5173) (dev) or [http://localhost:8000](http://localhost:8000) (production).
+
+**Grafana:** Open [http://localhost:3000](http://localhost:3000) — no login required.
 
 ## Tech Stack
 
 - **Python 3.12+** — producer, consumer, and API
+- **React + Vite** — frontend dashboard with customer and admin views
 - **Redpanda** — Kafka-compatible message broker (single binary, no ZooKeeper)
-- **Postgres 16** — stores triage results with idempotent writes
+- **Postgres 16** — stores triage results and tickets with idempotent writes
 - **Gemini 3.6 Flash** — LLM for classification and triage (free tier)
-- **FastAPI** — REST API for pipeline inspection
+- **FastAPI** — REST API for pipeline inspection + serves built frontend
 - **Prometheus** — metrics collection via pull-based scraping
 - **Grafana** — pre-built dashboard with 12 panels
 - **Docker Compose** — local infrastructure orchestration
+
+## Frontend
+
+The React dashboard has two views:
+
+**Customer View** (`/`) — submit a support ticket and look up its status by ticket ID.
+
+**Admin View** (`/admin`) — monitor ticket stats, generate synthetic tickets, and trigger AI triage processing on individual tickets.
+
+Two data paths feed the same AI pipeline:
+- **Kafka path** (autonomous): producer → Redpanda → consumer → Postgres
+- **API path** (interactive): frontend → `/api/tickets` → `triage_ticket()` → Postgres
 
 ## AI Agent Pipeline
 
@@ -105,8 +149,22 @@ src/triage_pipeline/
 ├── agent.py       # 3-step LLM agent (classify → urgency → draft)
 ├── llm.py         # original V0 single-call implementation
 ├── db.py          # Postgres persistence and query helpers
-├── api.py         # FastAPI REST API + HTTP metrics middleware
+├── api.py         # FastAPI REST API + HTTP metrics + SPA serving
 └── metrics.py     # Prometheus metric definitions
+
+frontend/src/
+├── main.jsx           # React entry point
+├── App.jsx            # Router layout (/ and /admin)
+├── App.css            # Styles with CSS custom properties + dark mode
+├── api.js             # Fetch wrapper for all API calls
+├── pages/
+│   ├── CustomerView.jsx   # Ticket form + status lookup
+│   └── AdminView.jsx      # Stats cards + ticket table + controls
+└── components/
+    ├── TicketForm.jsx     # Controlled form (name, email, subject, message)
+    ├── TicketTable.jsx    # Expandable rows with per-row Process button
+    ├── TicketDetail.jsx   # Full triage result view
+    └── StatusBadge.jsx    # Color-coded status/urgency pill
 
 monitoring/
 ├── prometheus.yml                          # scrape configuration
@@ -126,6 +184,7 @@ monitoring/
 | Redpanda Console | 8090 | http://localhost:8090 |
 | Postgres | 5433 | — |
 | FastAPI | 8000 | http://localhost:8000 |
+| Vite Dev Server | 5173 | http://localhost:5173 |
 | Consumer Metrics | 8001 | http://localhost:8001/metrics |
 | Prometheus | 9090 | http://localhost:9090 |
 | Grafana | 3000 | http://localhost:3000 |
@@ -134,5 +193,6 @@ monitoring/
 
 - **V0** — Core pipeline: produce → consume → triage → store
 - **V1** — Multi-step agent, retry/DLT, FastAPI API
-- **V2** (current) — Prometheus + Grafana observability
-- **V3** — Kubernetes deployment via kind
+- **V2** — Prometheus + Grafana observability
+- **V3** (current) — React frontend dashboard
+- **V4** — Kubernetes deployment via kind

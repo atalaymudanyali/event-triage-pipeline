@@ -620,3 +620,21 @@ frontend/src/
 ```
 
 **If an interviewer asks:** "Why React instead of a server-rendered template?" Answer: "The admin dashboard needs interactive updates — clicking Process triggers a 5-30 second API call and should show a loading spinner, then update the row without refreshing the page. The ticket table has expandable rows. The stats cards should refresh on demand. These are all client-side state management patterns that React handles naturally. A server-rendered page with HTMX could work, but React is the industry standard for dashboard UIs and demonstrates a broader skill set for a portfolio project."
+
+---
+
+### Commit: Serve built frontend from FastAPI and update README
+
+**What:** Modified FastAPI to serve the Vite production build (`frontend/dist/`) so the entire app runs on a single port (`:8000`) in production. Updated the README with the new architecture diagram, frontend section, dev workflow, and corrected version roadmap.
+
+**Key concepts:**
+- **SPA fallback middleware** — a single-page app uses client-side routing, so the server must return `index.html` for any path that isn't an API endpoint or static file. If the user navigates to `/admin` directly, the server can't 404 — it must serve `index.html` and let React Router handle the path. This is implemented as an HTTP middleware that intercepts 404 responses on GET requests and returns `index.html` instead, excluding `/api/*` and `/metrics` paths.
+- **StaticFiles mount** — FastAPI's `StaticFiles` serves the Vite build's hashed asset files (`/assets/index-abc123.js`). Vite adds content hashes to filenames, enabling aggressive browser caching — the hash changes when the content changes, so you can set `Cache-Control: immutable` and never serve stale code.
+- **Conditional mounting** — `if FRONTEND_DIST.is_dir()` means the API works standalone when no frontend build exists. During development, you run Vite's dev server separately (`:5173`) with its proxy. In production, `npm run build` creates the `dist/` directory and FastAPI serves everything.
+- **Middleware vs. catch-all route** — a catch-all route (`/{path:path}`) would shadow mounted sub-applications like `/metrics` because FastAPI evaluates routes before mounts. Using a middleware instead means the request first tries all routes and mounts normally; only if nothing matches (404) does the middleware intercept and serve the SPA shell.
+
+**Design decision: Why not a reverse proxy (Nginx)?**
+
+For a portfolio project running locally, adding Nginx adds infrastructure complexity without proportional benefit. In production you'd absolutely put Nginx or a cloud load balancer in front, but for a demo that runs with `docker compose up && uv run api`, having FastAPI serve the frontend is the simplest deployment story. The code is guarded by the `is_dir()` check, so it's zero-cost when not building the frontend.
+
+**If an interviewer asks:** "How would you deploy this differently in production?" Answer: "I'd put Nginx in front — it serves static assets directly with proper caching headers and proxies `/api/*` to FastAPI. The frontend build would run in a multi-stage Docker build, and the static files would go into the Nginx container. FastAPI would only handle API requests, which is better for performance since it doesn't need to serve JS/CSS. The SPA fallback would move to an Nginx `try_files` directive."
