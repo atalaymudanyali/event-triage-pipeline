@@ -545,3 +545,19 @@ Row 5 — API:          Request Rate by Endpoint | API Latency (p95)
 **If an interviewer asks:** "How would you alert on high error rates?" Answer: "Two options: (1) Prometheus alerting rules — define a rule like `rate(triage_errors_total[5m]) > 0.1` in a rules YAML file, and configure Alertmanager to send notifications (Slack, PagerDuty, email). (2) Grafana alerting — set alert conditions directly on dashboard panels. Prometheus alerting is more robust (survives Grafana downtime), but Grafana alerting is easier to set up for a small team."
 
 **If an interviewer asks:** "What happens to metrics when the consumer restarts?" Answer: "Counters reset to zero. Prometheus handles this with `rate()` — it detects the reset (value decreases) and adjusts the calculation. Histograms behave the same way. This is why you always use `rate()` on counters instead of raw values — raw values show misleading drops on restart."
+
+---
+
+### Commit: V2 tests, README update, and final polish
+
+**What:** Added `test_metrics.py` (verifying all six metric objects have correct types, labels, and custom buckets), extended `test_api.py` with `/metrics` endpoint tests, and overhauled the README to reflect V1 and V2 changes — updated architecture diagram, new Observability section, ports table, and current version roadmap.
+
+**Key concepts:**
+- **Testing Prometheus metrics** — you can inspect `_labelnames` and `_kwargs["buckets"]` on metric objects to verify they're configured correctly without needing a running Prometheus server. These are unit tests for your instrumentation *definitions*, not for whether Prometheus scrapes them.
+- **Testing `/metrics` endpoint** — after calling `/health`, the `/metrics` response should contain `http_requests_total` because the middleware counted that request. This proves the middleware is active and the Prometheus ASGI app is mounted correctly.
+
+**Design decision: Why overhaul the README after each version?**
+
+The README is the first thing a recruiter or interviewer sees. If it says "V0 (current)" while the code is at V2, it signals neglect. Updating the README per version keeps the documentation honest and shows attention to communication — a skill that matters as much as the code itself in a portfolio project.
+
+**If an interviewer asks:** "Walk me through the observability stack." Answer: "The consumer and API expose Prometheus metrics on ports 8001 and 8000. Prometheus scrapes both every 5 seconds and stores time series. Grafana connects to Prometheus and renders a pre-built dashboard with 12 panels — stat tiles for throughput, histograms for latency broken down by LLM step, pie charts for classification distribution, and time series for errors and API performance. Everything is provisioned as code — `docker compose up -d` gives you the full stack with no manual configuration."

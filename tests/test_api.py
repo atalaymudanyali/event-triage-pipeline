@@ -20,3 +20,14 @@ class TestOpenAPIDocs:
         assert schema["info"]["title"] == "Triage Pipeline API"
         assert "/events" in schema["paths"]
         assert "/stats" in schema["paths"]
+
+
+class TestMetricsEndpoint:
+    def test_metrics_returns_200(self):
+        response = client.get("/metrics")
+        assert response.status_code == 200
+
+    def test_metrics_contains_http_counters(self):
+        client.get("/health")
+        response = client.get("/metrics")
+        assert "http_requests_total" in response.text
