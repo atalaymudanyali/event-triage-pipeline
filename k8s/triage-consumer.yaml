@@ -23,6 +23,7 @@ spec:
       containers:
         - name: consumer
           image: triage-pipeline:latest
+          imagePullPolicy: Never
           command: ["uv", "run", "consume"]
           ports:
             - containerPort: 8001

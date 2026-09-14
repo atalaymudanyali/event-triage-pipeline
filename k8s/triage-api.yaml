@@ -23,6 +23,7 @@ spec:
       containers:
         - name: api
           image: triage-pipeline:latest
+          imagePullPolicy: Never
           ports:
             - containerPort: 8000
           env:

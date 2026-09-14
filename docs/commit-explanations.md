@@ -693,6 +693,7 @@ Locally, Postgres maps `5433:5432` so it doesn't conflict with any local Postgre
 - **NodePort Services** — expose services outside the cluster on fixed ports (30080, 30300, 30090, 30890). In production you'd use an Ingress controller or LoadBalancer type, but NodePort is the simplest option for local development and maps directly to kind's `extraPortMappings`.
 - **ClusterIP Services** — Postgres (5432) and Redpanda (9092) are ClusterIP-only, meaning they're accessible within the cluster but not from the host. There's no reason to expose database or broker ports externally.
 - **Same image, different command** — the consumer Deployment uses the same `triage-pipeline:latest` image as the API but overrides the command to `["uv", "run", "consume"]`. This is a common Kubernetes pattern: one image, multiple Deployments with different entrypoints.
+- **`imagePullPolicy: Never`** — by default, K8s tries to pull images from a registry (Docker Hub). Since our `triage-pipeline:latest` image is built locally and loaded into kind via `kind load docker-image`, it doesn't exist on any registry. Setting `imagePullPolicy: Never` tells K8s "don't try to pull this, it's already on the node." Without this, pods go into `ImagePullBackOff` because Docker Hub returns "repository does not exist."
 - **Readiness probes** — the API Deployment has an HTTP readiness probe on `/health`, and Postgres uses `pg_isready`. Kubernetes won't send traffic to a pod until its readiness probe passes, preventing connection errors during startup.
 - **PersistentVolumeClaims (PVCs)** — Postgres (1Gi), Redpanda (1Gi), Prometheus (2Gi), and Grafana (1Gi) each get a PVC. kind provisions these automatically using its default StorageClass. Data survives pod restarts but is deleted when the kind cluster is destroyed.
 - **Grafana datasource UID** — the datasource ConfigMap sets `uid: PBFA97CFB590B2093` explicitly. The pre-built dashboard JSON references this UID in every panel's datasource field. Without the exact UID match, Grafana would show "No data" on all panels.
@@ -705,6 +706,16 @@ Helm adds templating, release management, and a package ecosystem. For a portfol
 **Design decision: Why a setup script instead of `kubectl apply -f k8s/`?**
 
 Three resources can't be declarative YAML: the Secret (would expose credentials in git), the dashboard ConfigMap (would duplicate a 20KB JSON file), and the kind cluster itself (not a K8s resource). The setup script handles all three imperatively, then applies the declarative manifests in dependency order. It's also idempotent — `--dry-run=client -o yaml | kubectl apply -f -` recreates the secret/configmap cleanly on re-runs.
+
+**Bug encountered: `ImagePullBackOff` on triage-api and triage-consumer pods**
+
+After the first deployment, both application pods (`triage-api` and `triage-consumer`) went into `ImagePullBackOff`. The infrastructure pods (postgres, redpanda, prometheus, grafana) were all running fine because their images (`postgres:16-alpine`, `prom/prometheus:v3.4.0`, etc.) exist on Docker Hub and K8s pulled them successfully.
+
+The problem: K8s defaults to `imagePullPolicy: Always` for images tagged `:latest`. Even though `kind load docker-image` successfully loaded `triage-pipeline:latest` onto the kind node, K8s still tried to pull it from Docker Hub — where it doesn't exist (it's a local-only image). Docker Hub returned "repository does not exist or may require authorization," and after a few retries K8s put the pods into `ImagePullBackOff`.
+
+The fix: add `imagePullPolicy: Never` to both the triage-api and triage-consumer container specs. This tells K8s "this image is already on the node, don't try to pull it from a registry." For any image that's built locally and loaded into kind (rather than pushed to a registry), you need either `imagePullPolicy: Never` or `imagePullPolicy: IfNotPresent`.
+
+This is a classic kind/minikube gotcha. In production, images are pushed to a container registry (ECR, GCR, Docker Hub) and the default pull policy works fine. The local-development workflow — build, load into kind, deploy — requires explicitly telling K8s not to pull.
 
 **If an interviewer asks:** "How would you move this to production?" Answer: "Four things change: (1) kind becomes a managed cluster like EKS/GKE/AKS, (2) NodePort Services become Ingress resources with TLS termination, (3) Postgres and Redpanda become managed services (RDS, Confluent Cloud) or StatefulSets with proper backup/replication, and (4) Secrets move to a secrets manager like AWS Secrets Manager or Vault, injected via CSI driver. The application code and Docker image stay identical — that's the point of containerization."
 
