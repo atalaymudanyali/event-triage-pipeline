@@ -673,3 +673,37 @@ The API tests verify routing, request validation, status codes, and response sha
 Locally, Postgres maps `5433:5432` so it doesn't conflict with any local Postgres. But inside Docker, the API talks to Postgres directly on the internal network — port 5432 (the default Postgres port). The `environment` block in docker-compose overrides `POSTGRES_HOST` and `POSTGRES_PORT` so the same config works in both contexts without changing the `.env` file.
 
 **If an interviewer asks:** "Why not use Docker for consume/produce too?" Answer: "The consumer and producer are interactive demo tools — you run them in a terminal, watch the logs, and stop them manually. Putting them in Docker would hide the output and make the demo less visible. The API is different: it's a long-running server that should start automatically with the infrastructure. In production, you'd containerize everything, but for a portfolio demo, keeping consume/produce as local commands lets you show the event-driven flow in real time."
+
+---
+
+## V4: Kubernetes Deployment
+
+### Commit: K8s manifests, kind config, setup/teardown scripts
+
+**What:** Added 10 Kubernetes manifest files in `k8s/`, a kind cluster config, and setup/teardown scripts that deploy the entire stack to a local Kubernetes cluster. The same Docker image, same environment variables, same Grafana dashboard — but orchestrated by Kubernetes instead of Docker Compose.
+
+**Key concepts:**
+- **kind (Kubernetes in Docker)** — runs a full K8s cluster inside Docker containers. The `kind-config.yaml` uses `extraPortMappings` to forward host ports (8000, 3000, 9090, 8090) into the cluster's NodePort range. This gives the same `localhost:8000` experience as Docker Compose without any external load balancer.
+- **Namespace isolation** — all resources go into the `triage-pipeline` namespace, keeping them separate from any other workloads in the cluster. Every manifest specifies `namespace: triage-pipeline` explicitly.
+- **Deployments vs. StatefulSets** — we use Deployments for all services including Postgres and Redpanda. For a production stateful workload you'd use StatefulSets with stable network identities and ordered startup. Here, single-replica Deployments with PVCs are simpler and sufficient for a dev/portfolio context.
+- **Init containers** — replace Docker Compose's `depends_on`. Each init container (`busybox nc -z`) blocks until the target service is reachable on its port. This is the Kubernetes-native way to express service dependencies, since K8s has no built-in startup ordering.
+- **Secrets management** — the `secrets.yaml` is a documentation template with placeholder values. The actual secret is created imperatively by `k8s-setup.sh`, which reads your `.env` file and runs `kubectl create secret generic --from-literal`. This way real credentials never end up in version control.
+- **ConfigMaps for configuration** — Postgres init SQL, Prometheus scrape config, and Grafana provisioning are all stored as ConfigMaps and mounted into pods as files. This replaces Docker Compose's bind-mount volumes (`./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml`).
+- **The Grafana dashboard ConfigMap** — the 20KB dashboard JSON is loaded via `kubectl create configmap --from-file` in the setup script rather than inlining it in a manifest. This avoids duplicating the file and keeps the YAML readable.
+- **NodePort Services** — expose services outside the cluster on fixed ports (30080, 30300, 30090, 30890). In production you'd use an Ingress controller or LoadBalancer type, but NodePort is the simplest option for local development and maps directly to kind's `extraPortMappings`.
+- **ClusterIP Services** — Postgres (5432) and Redpanda (9092) are ClusterIP-only, meaning they're accessible within the cluster but not from the host. There's no reason to expose database or broker ports externally.
+- **Same image, different command** — the consumer Deployment uses the same `triage-pipeline:latest` image as the API but overrides the command to `["uv", "run", "consume"]`. This is a common Kubernetes pattern: one image, multiple Deployments with different entrypoints.
+- **Readiness probes** — the API Deployment has an HTTP readiness probe on `/health`, and Postgres uses `pg_isready`. Kubernetes won't send traffic to a pod until its readiness probe passes, preventing connection errors during startup.
+- **PersistentVolumeClaims (PVCs)** — Postgres (1Gi), Redpanda (1Gi), Prometheus (2Gi), and Grafana (1Gi) each get a PVC. kind provisions these automatically using its default StorageClass. Data survives pod restarts but is deleted when the kind cluster is destroyed.
+- **Grafana datasource UID** — the datasource ConfigMap sets `uid: PBFA97CFB590B2093` explicitly. The pre-built dashboard JSON references this UID in every panel's datasource field. Without the exact UID match, Grafana would show "No data" on all panels.
+- **fsGroup security context** — Prometheus runs as user `nobody` (UID 65534) and Grafana as UID 472. The `fsGroup` in the pod security context ensures the PVC is writable by these non-root users.
+
+**Design decision: Why plain YAML manifests instead of Helm?**
+
+Helm adds templating, release management, and a package ecosystem. For a portfolio project demonstrating K8s understanding, plain manifests are better: every field is visible, there's no abstraction hiding what's actually applied, and an interviewer can read the YAML directly. Helm is the right choice when you have multiple environments (dev/staging/prod) that need parameterized deploys, but here the goal is to show you understand what a Deployment, Service, ConfigMap, and PVC actually do.
+
+**Design decision: Why a setup script instead of `kubectl apply -f k8s/`?**
+
+Three resources can't be declarative YAML: the Secret (would expose credentials in git), the dashboard ConfigMap (would duplicate a 20KB JSON file), and the kind cluster itself (not a K8s resource). The setup script handles all three imperatively, then applies the declarative manifests in dependency order. It's also idempotent — `--dry-run=client -o yaml | kubectl apply -f -` recreates the secret/configmap cleanly on re-runs.
+
+**If an interviewer asks:** "How would you move this to production?" Answer: "Four things change: (1) kind becomes a managed cluster like EKS/GKE/AKS, (2) NodePort Services become Ingress resources with TLS termination, (3) Postgres and Redpanda become managed services (RDS, Confluent Cloud) or StatefulSets with proper backup/replication, and (4) Secrets move to a secrets manager like AWS Secrets Manager or Vault, injected via CSI driver. The application code and Docker image stay identical — that's the point of containerization."

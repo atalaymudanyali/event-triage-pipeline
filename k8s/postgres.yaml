@@ -1,0 +1,118 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init
+  namespace: triage-pipeline
+data:
+  init.sql: |
+    CREATE TABLE IF NOT EXISTS triage_results (
+        id              SERIAL PRIMARY KEY,
+        event_id        TEXT UNIQUE NOT NULL,
+        customer_name   TEXT NOT NULL,
+        customer_email  TEXT NOT NULL,
+        subject         TEXT NOT NULL,
+        message         TEXT NOT NULL,
+        category        TEXT NOT NULL,
+        urgency         TEXT NOT NULL,
+        suggested_action TEXT NOT NULL,
+        draft_response  TEXT,
+        language        TEXT NOT NULL DEFAULT 'en',
+        processed_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_triage_results_category ON triage_results (category);
+    CREATE INDEX IF NOT EXISTS idx_triage_results_urgency ON triage_results (urgency);
+    CREATE INDEX IF NOT EXISTS idx_triage_results_processed_at ON triage_results (processed_at);
+
+    CREATE TABLE IF NOT EXISTS tickets (
+        id                SERIAL PRIMARY KEY,
+        event_id          TEXT UNIQUE NOT NULL,
+        customer_name     TEXT NOT NULL,
+        customer_email    TEXT NOT NULL,
+        subject           TEXT NOT NULL,
+        message           TEXT NOT NULL,
+        status            TEXT NOT NULL DEFAULT 'pending',
+        category          TEXT,
+        urgency           TEXT,
+        suggested_action  TEXT,
+        draft_response    TEXT,
+        reasoning         TEXT,
+        language          TEXT DEFAULT 'en',
+        created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        processed_at      TIMESTAMPTZ
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_tickets_status ON tickets (status);
+    CREATE INDEX IF NOT EXISTS idx_tickets_created_at ON tickets (created_at);
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+  namespace: triage-pipeline
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: triage-pipeline
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: triage
+            - name: POSTGRES_USER
+              value: triage
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: triage-secrets
+                  key: POSTGRES_PASSWORD
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: init-sql
+              mountPath: /docker-entrypoint-initdb.d
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "triage", "-d", "triage"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: postgres-pvc
+        - name: init-sql
+          configMap:
+            name: postgres-init
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: triage-pipeline
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
