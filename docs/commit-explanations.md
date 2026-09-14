@@ -707,3 +707,15 @@ Helm adds templating, release management, and a package ecosystem. For a portfol
 Three resources can't be declarative YAML: the Secret (would expose credentials in git), the dashboard ConfigMap (would duplicate a 20KB JSON file), and the kind cluster itself (not a K8s resource). The setup script handles all three imperatively, then applies the declarative manifests in dependency order. It's also idempotent — `--dry-run=client -o yaml | kubectl apply -f -` recreates the secret/configmap cleanly on re-runs.
 
 **If an interviewer asks:** "How would you move this to production?" Answer: "Four things change: (1) kind becomes a managed cluster like EKS/GKE/AKS, (2) NodePort Services become Ingress resources with TLS termination, (3) Postgres and Redpanda become managed services (RDS, Confluent Cloud) or StatefulSets with proper backup/replication, and (4) Secrets move to a secrets manager like AWS Secrets Manager or Vault, injected via CSI driver. The application code and Docker image stay identical — that's the point of containerization."
+
+---
+
+### Commit: README update — K8s quick start and project structure
+
+**What:** Updated the README with a Kubernetes quick start option alongside Docker Compose, added the `k8s/` and `scripts/` directories to the project structure, added the NodePort mapping table, and moved V4 to "current" in the version roadmap.
+
+**Key concepts:**
+- **Two deployment paths** — the README now shows Docker Compose and Kubernetes side by side. Both use the same `.env` file and produce the same result (same ports, same dashboard), demonstrating that the application is deployment-agnostic. This is the whole point of containerization: the app doesn't know or care whether it's in Compose or K8s.
+- **Same ports, different plumbing** — `localhost:8000` works in both modes, but the path is different. Docker Compose maps `host:8000 → container:8000` directly. Kind maps `host:8000 → kind node:30080 → NodePort Service → Pod:8000`. The extra hop is the price of K8s's service discovery and load balancing layer.
+
+**If an interviewer asks:** "Why support both Docker Compose and Kubernetes?" Answer: "They serve different audiences. Docker Compose is the 30-second demo: clone, `docker compose up`, done. Kubernetes is for showing infrastructure skills: manifests, services, secrets, init containers. In a real team, Compose is local dev and K8s is staging/production. Supporting both proves the application is portable."

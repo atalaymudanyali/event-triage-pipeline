@@ -43,6 +43,8 @@ Demonstrates the event-driven architecture pattern used by companies like Trendy
 
 ## Quick Start
 
+### Option A: Docker Compose
+
 ```bash
 # 1. Set up your Gemini API key (free at https://aistudio.google.com/apikey)
 cp .env.example .env
@@ -52,7 +54,21 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-That's it. Open [http://localhost:8000](http://localhost:8000) for the dashboard and [http://localhost:3000](http://localhost:3000) for Grafana.
+### Option B: Kubernetes (kind)
+
+```bash
+# Prerequisites: docker, kind, kubectl
+# 1. Set up your .env (same as above)
+cp .env.example .env
+
+# 2. Create cluster and deploy everything
+bash scripts/k8s-setup.sh
+
+# Tear down when done
+bash scripts/k8s-teardown.sh
+```
+
+Open [http://localhost:8000](http://localhost:8000) for the dashboard and [http://localhost:3000](http://localhost:3000) for Grafana.
 
 ```bash
 # (Optional) Run the Kafka consumer for autonomous processing
@@ -84,6 +100,7 @@ cd frontend && npm install && npm run dev   # Vite on :5173, proxies /api/* to :
 - **Prometheus** — metrics collection via pull-based scraping
 - **Grafana** — pre-built dashboard with 12 panels
 - **Docker Compose** — local infrastructure orchestration
+- **Kubernetes (kind)** — local K8s deployment with plain YAML manifests
 
 ## Frontend
 
@@ -160,6 +177,23 @@ monitoring/
     │   └── dashboards/dashboards.yml       # dashboard file provider
     └── dashboards/
         └── triage-pipeline.json            # pre-built 12-panel dashboard
+
+k8s/
+├── kind-config.yaml         # kind cluster with NodePort mappings
+├── namespace.yaml           # triage-pipeline namespace
+├── secrets.yaml             # template (real secret created by setup script)
+├── postgres.yaml            # ConfigMap + PVC + Deployment + Service
+├── redpanda.yaml            # PVC + Deployment + ClusterIP Service
+├── redpanda-console.yaml    # Deployment + NodePort Service
+├── triage-api.yaml          # Deployment (init containers, readiness probe) + NodePort
+├── triage-consumer.yaml     # Deployment (command override) + ClusterIP Service
+├── prometheus.yaml          # ConfigMap + PVC + Deployment + NodePort Service
+└── grafana.yaml             # ConfigMaps + PVC + Deployment + NodePort Service
+
+scripts/
+├── init_db.sql              # Postgres schema
+├── k8s-setup.sh             # one-command K8s deployment
+└── k8s-teardown.sh          # cluster cleanup
 ```
 
 ## Ports
@@ -175,10 +209,19 @@ monitoring/
 | Prometheus | 9090 | http://localhost:9090 |
 | Grafana | 3000 | http://localhost:3000 |
 
+### Kubernetes (kind) Port Mapping
+
+| Host Port | NodePort | Service |
+|-----------|----------|---------|
+| 8000 | 30080 | triage-api |
+| 3000 | 30300 | grafana |
+| 9090 | 30090 | prometheus |
+| 8090 | 30890 | redpanda-console |
+
 ## Version Roadmap
 
 - **V0** — Core pipeline: produce → consume → triage → store
 - **V1** — Multi-step agent, retry/DLT, FastAPI API
 - **V2** — Prometheus + Grafana observability
-- **V3** (current) — React frontend dashboard
-- **V4** — Kubernetes deployment via kind
+- **V3** — React frontend dashboard
+- **V4** (current) — Kubernetes deployment via kind
