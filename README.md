@@ -101,6 +101,7 @@ cd frontend && npm install && npm run dev   # Vite on :5173, proxies /api/* to :
 - **Grafana** — pre-built dashboard with 12 panels
 - **Docker Compose** — local infrastructure orchestration
 - **Kubernetes (kind)** — local K8s deployment with plain YAML manifests
+- **GitHub Actions** — CI pipeline with lint and tests on every push
 
 ## Frontend
 
@@ -140,6 +141,15 @@ Metrics are exposed at:
 - Consumer: `http://localhost:8001/metrics`
 - API: `http://localhost:8000/metrics`
 - Prometheus targets: `http://localhost:9090/targets`
+
+## CI/CD
+
+**GitHub Actions** runs lint and tests on every push and pull request to `main`:
+
+- **Lint** — `ruff check` on all Python source and test files
+- **Tests** — 56 unit tests via pytest (models, API endpoints, agent prompts, metrics)
+
+A local **pre-push git hook** (`scripts/pre-push`) runs the same checks before allowing a push, so broken code never reaches the remote.
 
 ## Project Structure
 
@@ -192,8 +202,12 @@ k8s/
 
 scripts/
 ├── init_db.sql              # Postgres schema
+├── pre-push                 # git hook: lint + test before push
 ├── k8s-setup.sh             # one-command K8s deployment
 └── k8s-teardown.sh          # cluster cleanup
+
+.github/workflows/
+└── ci.yml                   # GitHub Actions: lint + test on push/PR
 ```
 
 ## Ports
